@@ -10,9 +10,9 @@ watchdog
 flask
 pyngrok
 requests
-# For potential OpenAI usage if configured, but we will make it optional in code
 openai
 tiktoken
 jira
 python-dotenv
-python-dotenv
+fastapi
+uvicorn[standard]

@@ -1,3 +1,22 @@
+# Environment
+.env
 
-.env
-.env
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# macOS
+.DS_Store
+
+# Logs (regenerated at runtime)
+data/app_logs.log
+webhook.log
+
+# Vector DB (regenerated from historical_incidents.json)
+data/chroma_db/
+
+# IDE
+.vscode/
+.idea/

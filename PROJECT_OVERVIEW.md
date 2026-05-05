@@ -1,23 +1,36 @@
-# OPS Agent Project Explanation
+# OPS Agent — AI-Driven Multi-Agent Incident Response System
 
 ## 1. Project Overview
-The **OPS Agent** is an AI-driven Operational Support Agent designed to simulate, detect, analyze, and resolve production incidents. It acts as an autonomous "Site Reliability Engineer" (SRE) that monitors system health, detects anomalies, identifies root causes using RAG (Retrieval-Augmented Generation), and executes recovery actions upon human approval (via Dashboard or Slack).
+The **OPS Agent** is an AI-driven Operational Support Agent designed to simulate, detect, analyze, and resolve production incidents autonomously. It operates as a **multi-agent SRE team** — five specialized AI agents coordinate through an orchestrator to handle the full incident lifecycle: from triage to root cause analysis to remediation and external communications.
 
-## 2. Architecture & Workflow
+## 2. Multi-Agent Architecture
 
-### High-Level Workflow
-1.  **Simulation**: The system generates synthetic application logs and metrics (CPU, Memory, Latency) to simulate a real production environment.
-2.  **Detection**: Anomaly detection logic identifies issues (e.g., "High CPU", "Log Errors").
-3.  **Analysis (Agent)**: The **RCA Agent** analyzes the incident using:
-    -   **Rule-based Heuristics**: Immediate symptom checking.
-    -   **RAG (Vector DB)**: Searches a knowledge base of historical incidents to find similar past issues and recommended fixes.
-4.  **Notification**: The agent sends alerts to **Slack** and creates tickets in **Jira**.
-5.  **Human-in-the-Loop**:
-    -   A human reviews the proposed action on the **Dashboard** or **Slack**.
-    -   If Approved -> The Agent executes a "Recovery Playbook" (e.g., Restart Service, Scale Up).
-    -   If Denied -> The ticket is escalated to L3 support.
+### Agent Team
 
-### System Architecture Diagram
+| Agent | Role | Key Capability |
+|:------|:-----|:----------------|
+| 🔍 **Triage Agent** | First responder | Symptom extraction, severity classification (P1/P2/P3), urgency scoring |
+| 🔬 **Diagnostics Agent** | Deep analysis | Log pattern correlation, affected service identification, LLM-enhanced summaries |
+| 🧠 **RCA Agent** | Root cause analysis | RAG-powered knowledge base search, hypothesis ranking, LLM reasoning chains |
+| 🛠️ **Remediation Agent** | Action planning | Policy safety checks, playbook selection, approval logic |
+| 📡 **Communications Agent** | External notifications | Slack alerts with interactive buttons, Jira ticket creation |
+| 🎯 **Orchestrator** | Central coordinator | Sequential pipeline management, feedback loops, workflow tracking |
+
+### Pipeline Flow
+
+```mermaid
+graph LR
+    Incident[Incident Detected] --> T[🔍 Triage]
+    T --> D[🔬 Diagnostics]
+    D --> R[🧠 RCA]
+    R -->|Low Confidence| D
+    R --> Rem[🛠️ Remediation]
+    Rem --> C[📡 Communications]
+    C --> Result[Analysis Complete]
+```
+
+### System Architecture
+
 ```mermaid
 graph TD
     subgraph "Simulation Core"
@@ -28,12 +41,23 @@ graph TD
         Engine -->|Generates| Logs
     end
 
-    subgraph "AI Agent Layer"
-        Detector[Anomaly Detector]
+    subgraph "Multi-Agent System"
+        Orch[Orchestrator Agent]
+        Triage[Triage Agent]
+        Diag[Diagnostics Agent]
         RCA[RCA Agent]
-        RAG[(Vector DB / Knowledge Base)]
-        Detector -->|Trigger| RCA
+        RAG[(ChromaDB Knowledge Base)]
+        Remed[Remediation Agent]
+        Policy[Policy Engine]
+        Comms[Communications Agent]
+        
+        Orch --> Triage
+        Orch --> Diag
+        Orch --> RCA
+        Orch --> Remed
+        Orch --> Comms
         RCA <-->|Search| RAG
+        Remed --> Policy
     end
 
     subgraph "Integration Layer"
@@ -47,69 +71,105 @@ graph TD
         Dash[Streamlit Dashboard]
     end
 
-    Logs -->|Ingest| Detector
-    Metrics -->|Ingest| Detector
-    RCA -->|Alert| Slack
-    RCA -->|Create Ticket| Jira
+    Logs -->|Ingest| Engine
+    Metrics -->|Ingest| Engine
+    Engine -->|Dispatch| Orch
+    Comms --> Slack
+    Comms --> Jira
     Webhook -->|User Action| Dash
     Dash -->|Control/Inject| Engine
     Dash -->|Visualize| Metrics
 ```
 
-## 3. Technologies Used
+## 3. Key Features
 
-| Technology | Role | Description |
-| :--- | :--- | :--- |
-| **Python** | Core Language | The entire backend, simulation, and agent logic are written in Python. |
-| **Streamlit** | Dashboard (Frontend) | Renders the real-time UI, metrics charts, and incident management console. It drives the main simulation loop in this demo setup. |
-| **Flask** | Webhook Server | A lightweight web server running on port 3000 to receive incoming webhooks from Slack (e.g., when a user clicks "Approve"). |
-| **LangChain** | AI Frameowrk | Used to manage the RAG pipeline and interactions with the Knowledge Base. |
-| **ChromaDB** | Vector Database | Stores embeddings of historical incidents (Knowledge Base) to allow semantic searching for RAG. |
-| **Plotly** | Visualization | Used by Streamlit for rendering interactive metric charts. |
-| **PyNgrok** | Tunneling | Exposes the local Flask server to the public internet so Slack can reach it. |
-| **Jira API** | Ticketing | Python `jira` library used to create and update tickets in a real Jira project. |
-| **Slack SDK** | Messaging | Used to post rich interactive messages to Slack channels. |
+- **Multi-Agent Coordination** — Five specialized agents work together via an in-process message bus
+- **RAG-Powered Analysis** — Historical incident knowledge base (ChromaDB) for root cause matching
+- **LLM Integration** — Optional OpenAI GPT-4o-mini for enhanced reasoning (graceful fallback to rule-based)
+- **Feedback Loops** — Low-confidence RCA triggers expanded diagnostics automatically
+- **Human-in-the-Loop** — Approve/deny actions via Dashboard or Slack interactive buttons
+- **Policy Engine** — Safety checks prevent dangerous actions without human approval
+- **Real-time Dashboard** — Agent pipeline visualization, per-agent detail tabs, conversation log
+- **External Integrations** — Live Slack alerts and Jira ticket creation
 
-## 4. Detailed Component Breakdown
+## 4. Technologies Used
 
-### A. Simulation Engine (`src/simulation`)
--   **`engine.py`**: The "brain" of the simulation. It runs a `tick()` loop that advances time.
--   **`metrics_generator.py`**: Produces synthetic metrics (CPU, Memory, Disk) with optional noise and anomaly patterns (e.g., linear increase for memory leak).
--   **`logs_generator.py`**: Generates realistic-looking app logs (INFO, ERROR, WARN) including stack traces during incidents.
--   **`state.py`**: Tracks the state of all incidents (active, resolved, escalated).
+| Technology | Role |
+|:-----------|:-----|
+| **Python** | Core language for all backend, simulation, and agent logic |
+| **Streamlit** | Real-time dashboard with agent pipeline visualization |
+| **Flask** | Webhook server for Slack interactive callbacks |
+| **ChromaDB** | Vector database for RAG-based incident knowledge base |
+| **OpenAI** | LLM integration for enhanced agent reasoning (optional) |
+| **Plotly** | Interactive metric charts |
+| **PyNgrok** | Tunneling for Slack webhook connectivity |
+| **Jira API** | Automated ticket creation and status management |
+| **Slack SDK** | Rich interactive message posting |
 
-### B. RCA Agent (`src/agent/rca_agent.py`)
--   **Logic**: When an incident is detected, the agent:
-    1.  Aggregates symptoms (e.g., "Latency > 2s", "ConnectionRefusedError").
-    2.  Queries **ChromaDB** for similar past incidents.
-    3.  Scores hypotheses based on similarity confidence.
-    4.  Proposes the top-ranked solution.
--   **Knowledge Base**: A JSON file (`data/historical_incidents.json`) loaded into the Vector DB at startup.
+## 5. Project Structure
 
-### C. Webhook Server (`src/integration/webhook_server.py`)
--   **Purpose**: Slack cannot talk to `localhost` directly.
--   **Flow**:
-    1.  User clicks "Approve" in Slack.
-    2.  Slack sends POST request to the **Ngrok** public URL.
-    3.  Ngrok forwards to local Flask app (Port 3000).
-    4.  Flask app writes the action to `data/pending_actions.json`.
-    5.  Streamlit Dashboard polls this file and executes the approval.
+```
+OPS_agent/
+├── dashboard/
+│   └── app.py                     # Streamlit dashboard with multi-agent UI
+├── data/
+│   ├── historical_incidents.json  # RAG knowledge base (21 incidents)
+│   └── pending_actions.json       # Slack webhook action queue
+├── src/
+│   ├── agent/                     # Multi-Agent System
+│   │   ├── orchestrator.py        # Central coordinator & workflow FSM
+│   │   ├── triage_agent.py        # Severity classification
+│   │   ├── diagnostics_agent.py   # Deep log analysis
+│   │   ├── rca_agent.py           # RAG-powered root cause analysis
+│   │   ├── remediation_agent.py   # Action planning & policy check
+│   │   ├── comms_agent.py         # Slack & Jira notifications
+│   │   ├── base_agent.py          # Abstract base with timing
+│   │   ├── message_bus.py         # In-process message bus
+│   │   ├── llm_client.py          # OpenAI wrapper with mock fallback
+│   │   └── models.py              # Data models for agent reports
+│   ├── simulation/                # Simulation Engine
+│   │   ├── engine.py              # Tick-based simulation loop
+│   │   ├── incident.py            # Incident state machine
+│   │   ├── state.py               # Incident lifecycle tracker
+│   │   ├── metrics_generator.py   # Synthetic metrics (CPU, Memory, etc.)
+│   │   ├── logs_generator.py      # Synthetic application logs
+│   │   └── observations.py        # Log ingestion & feature extraction
+│   ├── detection/
+│   │   └── anomaly_model.py       # Rule-based + ML anomaly detection
+│   ├── integration/
+│   │   ├── slack_client.py        # Slack API integration
+│   │   ├── jira_client.py         # Jira API integration
+│   │   └── webhook_server.py      # Flask webhook endpoint
+│   ├── orchestration/
+│   │   └── policy_engine.py       # Action safety classification
+│   └── rag/
+│       └── vector_db.py           # ChromaDB knowledge base
+├── run_demo_server.py             # Webhook + Ngrok startup
+├── startup.sh                     # One-command launcher
+├── requirements.txt               # Python dependencies
+└── .env                           # API keys & configuration
+```
 
-### D. Dashboard (`dashboard/app.py`)
--   **Visualization**: Graphs for system health.
--   **Control**: Buttons to manually inject chaos (e.g., "Inject High CPU").
--   **Console**: A "Chaos Terminal" that shows internal logs and allows command-line interaction.
+## 6. Running the System
 
-## 5. How to Answer Questions about this Project
+```bash
+# Install dependencies
+pip install -r requirements.txt
 
-**Q: How does the AI know what to do?**
-A: It uses **RAG (Retrieval-Augmented Generation)**. It looks at the current error symptoms and searches a vector database of *past* solved incidents to find the best match. It doesn't just "guess"; it relies on historical organizational knowledge.
+# Option 1: Full system (Dashboard + Webhook Server)
+bash startup.sh
 
-**Q: How does Slack talk to my local machine?**
-A: We use **Ngrok** to create a secure tunnel. Slack sends data to the public Ngrok URL, which pipes it to our local Flask server.
+# Option 2: Dashboard only
+streamlit run dashboard/app.py
 
-**Q: What happens if I click "Approve"?**
-A: The approval is captured by the Webhook Server, stored in a pending queue, and picked up by the Simulation Engine. The Engine then runs a specific **Recovery Playbook** (a Python script) tailored to that incident type (e.g., "Restart Service" for a "Service Down" incident).
+# Option 3: Webhook server only (for Slack integration)
+python3 run_demo_server.py
+```
 
-**Q: Is the data real?**
-A: In this demo, the data is **synthetic** (generated by `metrics_generator.py`), but the *processes* (Jira ticket creation, Slack alerting, RAG analysis) are real and functional.
+## 7. Enabling LLM Mode
+
+Add your OpenAI API key to `.env`:
+```
+OPENAI_API_KEY="sk-your-key-here"
+```
+When set, agents use GPT-4o-mini for enhanced reasoning. When empty, agents use fully functional rule-based logic.

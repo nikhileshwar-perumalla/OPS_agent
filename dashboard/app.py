@@ -18,18 +18,19 @@ from src.simulation.observations import FileLogSource
 from src.detection.anomaly_model import AnomalyDetector
 from src.integration.slack_client import SlackNotifier
 from src.integration.jira_client import JiraConnector
-from src.agent.rca_agent import RCAAgent
+from src.agent.orchestrator import OrchestratorAgent
+from src.agent.message_bus import MessageBus
+from src.agent.llm_client import LLMClient
 from src.orchestration.policy_engine import PolicyEngine
 
 # Page Config
-st.set_page_config(page_title="AI Ops Agent (Phase 2)", layout="wide")
+st.set_page_config(page_title="AI Ops Agent — Multi-Agent", layout="wide")
 
 # Valid States
 if 'engine' not in st.session_state:
     engine = SimulationEngine()
     # Configure Dependencies
     engine.log_source = FileLogSource('data/app_logs.log')
-    engine.agent = RCAAgent() 
     engine.detector = AnomalyDetector()
     engine.slack_notifier = SlackNotifier(webhook_url=os.getenv("SLACK_WEBHOOK_URL"), mock=False)
     engine.jira_connector = JiraConnector(
@@ -42,11 +43,10 @@ if 'engine' not in st.session_state:
     st.session_state.engine = engine
 
 # --- Dependency Management ---
-# Use cache_resource to keep DB connections alive across reruns
 @st.cache_resource
-def get_shared_agent():
-    print("[App] Initializing Cached RCAAgent...")
-    return RCAAgent()
+def get_shared_llm():
+    print("[App] Initializing Cached LLMClient...")
+    return LLMClient()
 
 @st.cache_resource
 def get_shared_slack():
@@ -61,13 +61,26 @@ def get_shared_jira():
             mock=False
     )
 
-# Always re-attach dependencies to the session text engine
-# This fixes the issue where unpicklable objects (like ChromaDB) are lost on rerun
-st.session_state.engine.agent = get_shared_agent()
-st.session_state.engine.slack_notifier = get_shared_slack()
-st.session_state.engine.jira_connector = get_shared_jira()
-    
+# Re-attach dependencies to session engine
+# This fixes the issue where unpicklable objects are lost on rerun
 engine = st.session_state.engine
+engine.slack_notifier = get_shared_slack()
+engine.jira_connector = get_shared_jira()
+
+# Re-initialize orchestrator with cached dependencies if needed
+if engine.orchestrator is None:
+    llm = get_shared_llm()
+    engine.llm_client = llm
+    engine.orchestrator = OrchestratorAgent(
+        bus=engine.message_bus,
+        slack_notifier=engine.slack_notifier,
+        jira_connector=engine.jira_connector,
+        llm_client=llm
+    )
+else:
+    # Update comms agent references
+    engine.orchestrator.comms.slack = engine.slack_notifier
+    engine.orchestrator.comms.jira = engine.jira_connector
 
 if 'auto_run' not in st.session_state:
     st.session_state.auto_run = False
@@ -75,15 +88,16 @@ if 'auto_run' not in st.session_state:
 if 'tick_history' not in st.session_state:
     st.session_state.tick_history = []
 
-engine = st.session_state.engine
-
 # --- Sidebar ---
 st.sidebar.title("🎮 Simulation Control")
 
 # Mode Selection
-# Defaulting to SIMULATION (User requested removal of Observe Only)
 engine.set_mode(SimulationMode.SIMULATION)
 st.sidebar.caption(f"Mode: {engine.mode.value.upper()}")
+
+# LLM Status
+llm_mode = "🟢 LLM Active" if (engine.llm_client and engine.llm_client.is_active) else "🟡 Mock Mode"
+st.sidebar.caption(f"AI: {llm_mode}")
 
 st.sidebar.divider()
 
@@ -91,7 +105,7 @@ st.sidebar.divider()
 col1, col2 = st.sidebar.columns(2)
 if col1.button("▶️ Start"):
     st.session_state.auto_run = True
-if col2.button("MwPause"):
+if col2.button("⏸️ Pause"):
     st.session_state.auto_run = False
 
 if st.sidebar.button("⏩ Step Tick"):
@@ -111,14 +125,27 @@ if st.sidebar.button("Inject"):
     engine.inject_incident(inc_type)
     st.toast(f"Injected {inc_type}")
 
+# Agent Stats (Sidebar)
+st.sidebar.divider()
+st.sidebar.subheader("🤖 Agent Stats")
+if engine.orchestrator:
+    stats = engine.orchestrator.get_agent_stats()
+    for agent_name, agent_stats in stats.items():
+        if agent_name in ('bus', 'llm'):
+            continue
+        calls = agent_stats.get('calls', 0)
+        avg = agent_stats.get('avg_time_ms', 0)
+        st.sidebar.caption(f"**{agent_name}**: {calls} calls, {avg:.0f}ms avg")
+
 # --- Main UI ---
-st.title("🛡️ AI Ops Agent: Phase 2")
+st.title("🛡️ AI Ops Agent: Multi-Agent System")
 
 # Metrics & State Display
-m_col1, m_col2, m_col3 = st.columns(3)
+m_col1, m_col2, m_col3, m_col4 = st.columns(4)
 m_col1.metric("Tick", engine.tick_count)
 m_col2.metric("Active Incidents", len(engine.state_tracker.get_active()))
 m_col3.metric("Mode", engine.mode.value.upper())
+m_col4.metric("Agents", "5 Active" if engine.orchestrator else "None")
 
 # Tick Logic (Fragment for Auto-Run)
 @st.fragment(run_every=2 if st.session_state.auto_run else None)
@@ -126,15 +153,9 @@ def game_loop():
     should_tick = False
     if st.session_state.auto_run:
         should_tick = True
-    elif st.session_state.get('step_once'):
-        # Only tick once, then consume the flag (state trickery needed here?)
-        # Actually fragments might re-run, simpler to just check session state trigger outside?
-        # For simplicity, if auto_run is off, we rely on the main script rerun triggered by button.
-        pass
 
     if should_tick:
         state = engine.tick()
-        # Append to history for viz
         st.session_state.tick_history.append(state)
         if len(st.session_state.tick_history) > 30:
              st.session_state.tick_history.pop(0)
@@ -143,28 +164,25 @@ def game_loop():
     if st.session_state.tick_history:
         latest = st.session_state.tick_history[-1]
         metrics = latest.get('metrics', {})
-        features = latest.get('log_features', {})
-        analysis = metrics.get('latest_analysis') # Retrieved from engine
-        
-        # Charts
-        # Metric Chart (Full Width)
+
+        # Charts - Metric Chart (Full Width)
         df = pd.DataFrame([s['metrics'] for s in st.session_state.tick_history])
         if not df.empty and 'cpu_percent' in df.columns:
-            st.subheader("System Metrics")
-            # Added disk_percent if available
+            st.subheader("📊 System Metrics")
             cols = ['cpu_percent', 'memory_percent', 'latency_seconds']
             if 'disk_percent' in df.columns: cols.append('disk_percent')
             st.line_chart(df[cols])
             
-        # Incident List
-        st.subheader("Active Incidents")
+        # ================================================
+        # INCIDENT LIST WITH MULTI-AGENT DETAIL
+        # ================================================
+        st.subheader("🚨 Active Incidents")
         
-        # Use LIVE state, not history (avoids UI lag on resolution)
+        # Use LIVE state, not history
         active_incidents = engine.state_tracker.get_active()
         
         if active_incidents:
             for incident in active_incidents:
-                # Color code based on severity/state
                 status_icon = "🔥" if incident.state.value == "ESCALATED" else "⚠️"
                 label = f"{status_icon} **{incident.id}** | Type: {incident.type.value} | State: {incident.state.value}"
                 
@@ -177,51 +195,191 @@ def game_loop():
                         ticket_link = f"{jira_url}/browse/{incident.jira_ticket_key}"
                         st.markdown(f"🎫 **Jira Ticket:** [{incident.jira_ticket_key}]({ticket_link})")
 
-                    # Show Analysis Persistence
+                    # Show Analysis with Multi-Agent Detail
                     if incident.analysis:
                         analysis = incident.analysis
-                        st.subheader(f"🧠 Agent Hypothesis")
-                        
-                        # Top Recommendation
-                        st.markdown(f"**Top Recommendation**: `{analysis.get('top_recommendation')}`")
-                        st.markdown(f"**Summary**: {analysis.get('summary')}")
-                        
-                        # Ranked Hypotheses
-                        st.caption("Ranked Hypotheses (Confidence)")
-                        for hyp in analysis.get('hypotheses', []):
-                            conf = hyp['confidence']
-                            st.progress(conf, text=f"{hyp['root_cause']} ({int(conf*100)}%) - {hyp['reasoning']}")
-                        
-                        if analysis.get('needs_approval'):
-                            st.warning("⚠️ Action Requires Approval (Policy Check)")
-                            c_act1, c_act2 = st.columns(2)
-                            # We use unique keys for buttons
-                            if c_act1.button("✅ Approve", key=f"app_{incident.id}"):
-                                engine.approve_action(incident.id)
-                                st.toast("Action Approved! System Recovering...")
-                                time.sleep(1)
-                                st.rerun()
-                                
-                            if c_act2.button("❌ Deny", key=f"den_{incident.id}"):
-                                engine.deny_action(incident.id)
-                                st.toast("Action Denied. Escalating...")
-                                time.sleep(1)
-                                st.rerun()
-                    else:
 
+                        # ============================================
+                        # AGENT WORKFLOW PIPELINE VISUALIZATION
+                        # ============================================
+                        workflow = analysis.get('workflow_stages', {})
+                        if workflow:
+                            st.subheader("🤖 Agent Pipeline")
+                            
+                            pipeline_cols = st.columns(5)
+                            stages = [
+                                ('triage', '🔍', 'Triage'),
+                                ('diagnostics', '🔬', 'Diagnostics'),
+                                ('rca', '🧠', 'RCA'),
+                                ('remediation', '🛠️', 'Remediation'),
+                                ('comms', '📡', 'Comms')
+                            ]
+                            
+                            for i, (key, icon, label) in enumerate(stages):
+                                stage_data = workflow.get(key, {})
+                                status = stage_data.get('status', 'pending')
+                                duration = stage_data.get('duration_ms', 0)
+                                summary = stage_data.get('output_summary', '')
+                                
+                                status_emoji = {'complete': '🟢', 'error': '🔴', 'skipped': '⚪'}.get(status, '🟡')
+                                
+                                with pipeline_cols[i]:
+                                    st.markdown(f"**{icon} {label}**")
+                                    st.caption(f"{status_emoji} {status.upper()}")
+                                    st.caption(f"⏱️ {duration:.0f}ms")
+                                    if summary:
+                                        st.caption(summary)
+                            
+                            # Total pipeline time
+                            total_ms = analysis.get('pipeline_duration_ms', 0)
+                            llm_active = analysis.get('llm_active', False)
+                            st.caption(f"📐 Total Pipeline: **{total_ms:.0f}ms** | "
+                                       f"AI: {'🟢 LLM' if llm_active else '🟡 Rule-based'}")
+
+                        # ============================================
+                        # TABBED AGENT DETAIL VIEW
+                        # ============================================
+                        tab_overview, tab_triage, tab_diag, tab_rca, tab_remediation, tab_conversation = st.tabs([
+                            "📋 Overview", "🔍 Triage", "🔬 Diagnostics", 
+                            "🧠 RCA", "🛠️ Remediation", "💬 Agent Chat"
+                        ])
+                        
+                        with tab_overview:
+                            st.markdown(f"**Top Recommendation**: `{analysis.get('top_recommendation')}`")
+                            st.markdown(f"**Severity**: `{analysis.get('severity')}`")
+                            st.markdown(f"**Summary**: {analysis.get('summary')}")
+                            
+                            # Ranked Hypotheses
+                            st.caption("Ranked Hypotheses (Confidence)")
+                            for hyp in analysis.get('hypotheses', []):
+                                conf = hyp['confidence']
+                                st.progress(conf, text=f"{hyp['root_cause']} ({int(conf*100)}%) — {hyp.get('reasoning', '')[:100]}")
+                            
+                            if analysis.get('needs_approval'):
+                                st.warning("⚠️ Action Requires Approval (Policy Check)")
+                                c_act1, c_act2 = st.columns(2)
+                                if c_act1.button("✅ Approve", key=f"app_{incident.id}"):
+                                    engine.approve_action(incident.id)
+                                    st.toast("Action Approved! System Recovering...")
+                                    time.sleep(1)
+                                    st.rerun()
+                                if c_act2.button("❌ Deny", key=f"den_{incident.id}"):
+                                    engine.deny_action(incident.id)
+                                    st.toast("Action Denied. Escalating...")
+                                    time.sleep(1)
+                                    st.rerun()
+                        
+                        with tab_triage:
+                            triage = analysis.get('triage_report', {})
+                            if triage:
+                                st.markdown(f"**Severity**: `{triage.get('severity', '?')}`")
+                                st.markdown(f"**Urgency Score**: `{triage.get('urgency_score', 0):.2f}`")
+                                st.markdown("**Detected Symptoms:**")
+                                for s in triage.get('symptoms', []):
+                                    st.markdown(f"- {s}")
+                            else:
+                                st.info("No triage data available")
+                        
+                        with tab_diag:
+                            diag = analysis.get('diagnostic_report', {})
+                            if diag:
+                                st.markdown(f"**Diagnostic Summary**: {diag.get('readable_summary', 'N/A')}")
+                                llm_badge = "🟢 LLM-Enhanced" if diag.get('llm_enhanced') else "🟡 Rule-based"
+                                st.caption(f"Analysis Mode: {llm_badge}")
+                                
+                                d_col1, d_col2 = st.columns(2)
+                                with d_col1:
+                                    st.markdown("**Error Patterns:**")
+                                    for p in diag.get('error_patterns', []):
+                                        st.code(p, language=None)
+                                with d_col2:
+                                    st.markdown("**Affected Services:**")
+                                    for s in diag.get('affected_services', []):
+                                        st.markdown(f"🔸 {s}")
+                                
+                                st.markdown("**Correlated Symptoms:**")
+                                for c in diag.get('correlated_symptoms', []):
+                                    st.markdown(f"↳ {c}")
+                            else:
+                                st.info("No diagnostic data available")
+                        
+                        with tab_rca:
+                            rca = analysis.get('rca_report', {})
+                            if rca:
+                                st.markdown(f"**RAG Matches**: {rca.get('rag_match_count', 0)}")
+                                
+                                if rca.get('llm_reasoning'):
+                                    st.markdown("**🧠 LLM Reasoning Chain:**")
+                                    st.info(rca['llm_reasoning'])
+                                
+                                top = rca.get('top_root_cause', {})
+                                if top:
+                                    st.markdown(f"**Top Root Cause**: {top.get('root_cause', 'Unknown')}")
+                                    st.markdown(f"**Confidence**: {top.get('confidence', 0):.2%}")
+                                    st.markdown(f"**Historical Match**: {top.get('historical_id', 'N/A')}")
+                                    if top.get('resolution'):
+                                        st.markdown(f"**Past Resolution**: {top['resolution']}")
+                            else:
+                                st.info("No RCA data available")
+                        
+                        with tab_remediation:
+                            rem = analysis.get('remediation_plan', {})
+                            if rem:
+                                st.markdown(f"**Recommended Action**: `{rem.get('recommended_action')}`")
+                                
+                                safety = rem.get('safety_status', 'UNKNOWN')
+                                safety_colors = {'ALLOWED': '🟢', 'REQUIRES_APPROVAL': '🟡', 'BLOCKED': '🔴'}
+                                st.markdown(f"**Safety**: {safety_colors.get(safety, '⚪')} {safety}")
+                                st.markdown(f"**Needs Approval**: {'Yes' if rem.get('needs_approval') else 'No'}")
+                                st.markdown(f"**Playbook**: `{rem.get('playbook_id', 'N/A')}`")
+                                st.markdown(f"**Confidence**: {rem.get('confidence', 0):.2%}")
+                                
+                                if rem.get('safety_message'):
+                                    st.caption(f"Policy: {rem['safety_message']}")
+                            else:
+                                st.info("No remediation data available")
+                        
+                        with tab_conversation:
+                            conversation = analysis.get('agent_conversation', [])
+                            if conversation:
+                                st.caption(f"{len(conversation)} messages in pipeline")
+                                
+                                agent_colors = {
+                                    'orchestrator': '🎯',
+                                    'triage': '🔍',
+                                    'diagnostics': '🔬',
+                                    'rca': '🧠',
+                                    'remediation': '🛠️',
+                                    'comms': '📡'
+                                }
+                                
+                                for msg in conversation:
+                                    sender = msg.get('sender', 'unknown')
+                                    icon = agent_colors.get(sender, '💬')
+                                    msg_type = msg.get('type', '')
+                                    recipient = msg.get('recipient', '')
+                                    duration = msg.get('duration_ms', 0)
+                                    summary = msg.get('payload_summary', '')
+                                    
+                                    with st.chat_message(sender, avatar=icon):
+                                        st.caption(f"**{msg_type}** → {recipient} ({duration:.0f}ms)")
+                                        st.write(summary)
+                            else:
+                                st.info("No conversation data")
+
+                    else:
                         # Check if we have a recent error
                         logs = getattr(engine, 'system_logs', [])
-                        recent_logs = logs[-5:] # check last 5
+                        recent_logs = logs[-5:]
                         agent_error = next((l for l in recent_logs if "[Agent Error]" in l), None)
                         
                         if agent_error:
                              st.error(f"⚠️ Analysis Failed: {agent_error}")
                              if st.button("🔄 Retry Analysis", key=f"retry_{incident.id}"):
-                                 # Force re-trigger
                                  engine.trigger_reanalysis()
                                  st.rerun()
                         else:
-                             st.info("⏳ Waiting for Agent Analysis... (Next Tick)")
+                             st.info("⏳ Waiting for Multi-Agent Analysis... (Next Tick)")
         else:
             st.success("No Active Incidents")
 
@@ -250,7 +408,6 @@ def game_loop():
                     json.dump([], f)
                     
         except Exception as e:
-            # print(f"Polling Error: {e}")
             pass
 
 game_loop()
@@ -264,24 +421,26 @@ if st.session_state.step_once and not st.session_state.auto_run:
 st.divider()
 st.subheader("💻 Chaos Terminal")
 
-# Live Terminal Output
+# Live Terminal Output — includes agent logs
 terminal_logs = getattr(engine, 'system_logs', [])
-terminal_text = "\n".join(terminal_logs[-20:]) # Show last 20 lines
+if engine.orchestrator:
+    agent_logs = engine.orchestrator.get_all_logs()
+    # Merge and deduplicate
+    all_logs = list(set(terminal_logs + agent_logs))
+    all_logs.sort()
+    terminal_text = "\n".join(all_logs[-25:])
+else:
+    terminal_text = "\n".join(terminal_logs[-20:])
+
 st.code(terminal_text, language="bash")
 
-# Unified Input
-# Unified Input (Chat Style - Fixed at Bottom)
-# prompt = st.chat_input("admin@ops-agent:~$ Type command or paste logs...")
-# Use chat_input to allow "Enter to Run" behavior
+# Unified Input (Chat Style)
 prompt = st.chat_input("admin@ops-agent:~$ (Type command or paste logs)")
 
 if prompt:
     lines = prompt.strip().split('\n')
     
-    # Echo to Chaos Terminal
-    # engine.log(f"[User Input] {prompt}") # Optional echo
-    
-    # Heuristic: Is this a log paste? (Multiple lines or timestamp/level)
+    # Heuristic: Is this a log paste?
     is_log = len(lines) > 1 or any(x in prompt for x in ["INFO", "WARN", "ERROR", "202"])
     
     if is_log:
@@ -291,7 +450,6 @@ if prompt:
             with open(log_file, 'a') as f:
                 f.write("\n" + prompt + "\n")
             
-            # Echo to Chaos Terminal for visual feedback
             engine.log(f"[Injector] Writing {len(lines)} lines to log stream...")
             for line in lines:
                 if line.strip():
@@ -299,22 +457,17 @@ if prompt:
                     
             st.toast(f"Injected {len(lines)} log lines")
             
-            # Force Immediate Action
-            engine.cooldown_until = 0 # Bypass any cooldowns
+            engine.cooldown_until = 0
             
             if engine.trigger_reanalysis():
-                 # Incident exists, re-analyze
                  st.toast("Logs Injected. Re-analyzing...")
             else:
-                 # No incident, this should trigger one next tick
                  st.toast("Logs Injected. Triggering Detection...")
             
-            # Force a tick immediately to process the new logs/state
             state = engine.tick()
             st.session_state.tick_history.append(state)
             
-            # Rerun to show results instantly
-            time.sleep(0.1) # Brief pause to ensure files flush if needed
+            time.sleep(0.1)
             st.rerun()
                  
         except Exception as e:
@@ -325,7 +478,6 @@ if prompt:
         cmd = prompt.strip().lower()
         
         if cmd == "help":
-            # We can't really print to the chat input, so print to terminal log
             help_text = """
             Available Commands:
             - inject cpu          : Trigger High CPU Incident
@@ -338,6 +490,7 @@ if prompt:
             - inject ssl          : Trigger SSL Expiry
             - resolve <id>        : Force resolve incident
             - status              : Show engine status
+            - agents              : Show agent statistics
             """
             for line in help_text.split('\n'):
                  if line.strip(): engine.log(line.strip())
@@ -375,9 +528,20 @@ if prompt:
                 engine.approve_action(iid)
                 st.toast(f"Force Resolved {iid}")
                 st.rerun()
+        
+        elif cmd == "agents":
+            if engine.orchestrator:
+                stats = engine.orchestrator.get_agent_stats()
+                for name, data in stats.items():
+                    engine.log(f"[Agent Stats] {name}: {data}")
+            else:
+                engine.log("[Error] Orchestrator not initialized")
                 
         elif cmd == "status":
-            engine.log(f"Tick: {engine.tick_count} | Mode: {engine.mode.value} | Incidents: {len(engine.state_tracker.get_active())}")
+            engine.log(f"Tick: {engine.tick_count} | Mode: {engine.mode.value} | "
+                       f"Incidents: {len(engine.state_tracker.get_active())} | "
+                       f"Agents: {'5 Active' if engine.orchestrator else 'None'} | "
+                       f"LLM: {'Active' if (engine.llm_client and engine.llm_client.is_active) else 'Mock'}")
             
         else:
             engine.log(f"[Error] Command not found: {cmd}")

@@ -10,7 +10,9 @@ from .state import StateTracker
 from .metrics_generator import MetricsGenerator
 from .logs_generator import LogGenerator
 from .observations import ObservationWindow
-from src.agent.rca_agent import RCAAgent
+from src.agent.orchestrator import OrchestratorAgent
+from src.agent.message_bus import MessageBus
+from src.agent.llm_client import LLMClient
 
 class SimulationMode(Enum):
     SIMULATION = "simulation"
@@ -25,7 +27,6 @@ class SimulationEngine:
         # Components
         self.state_tracker = StateTracker()
         self.metrics_generator = MetricsGenerator()
-        self.metrics_generator = MetricsGenerator()
         self.log_generator = LogGenerator()
         self.observation_window = ObservationWindow()
         
@@ -33,10 +34,14 @@ class SimulationEngine:
         self.system_logs = []
         self.cooldown_until = 0  
         
+        # Multi-Agent System
+        self.message_bus = MessageBus()
+        self.orchestrator = None
+        self.llm_client = None
+        
         # External dependencies (to be set)
         self.log_source = None
         self.detector = None
-        self.agent = None
         self.slack_notifier = None
         self.jira_connector = None
 
@@ -68,24 +73,34 @@ class SimulationEngine:
         except ValueError:
             self.log(f"[Engine] Unknown incident type: {incident_type_str}")
 
+    def _ensure_orchestrator(self):
+        """Initialize or re-initialize the orchestrator with current dependencies."""
+        if self.orchestrator is None:
+            try:
+                self.llm_client = LLMClient()
+                self.orchestrator = OrchestratorAgent(
+                    bus=self.message_bus,
+                    slack_notifier=self.slack_notifier,
+                    jira_connector=self.jira_connector,
+                    llm_client=self.llm_client
+                )
+                self.log("[Engine] Multi-Agent Orchestrator initialized (5 agents)")
+            except Exception as e:
+                self.log(f"[Engine] Orchestrator Init Failed: {e}")
+                import traceback
+                traceback.print_exc()
+
     def tick(self):
         """
         Executes one simulation tick.
         """
         self.tick_count += 1
         
-        # Ensure Agent is Alive (Resuscitation for st.fragment)
-        if self.agent is None:
-             try:
-                 # print("[Engine] tick(): Resuscitating Agent...")
-                 self.agent = RCAAgent()
-             except Exception as e:
-                 print(f"[Engine] Agent Init Failed: {e}")
+        # Ensure Multi-Agent System is alive
+        self._ensure_orchestrator()
         
         # Capture local reference for stability
-        local_agent = self.agent
-        local_slack = self.slack_notifier
-        local_jira = self.jira_connector
+        local_orchestrator = self.orchestrator
 
         active_incidents = self.state_tracker.get_active()
 
@@ -131,7 +146,6 @@ class SimulationEngine:
             new_logs = self.log_source.fetch_new_logs()
             if new_logs:
                 self.observation_window.add_logs(new_logs)
-                # self.log(f"[Logs] Ingested {len(new_logs)} new log lines.") # Too noisy?
             
         # 3. Detect & Update
         if self.detector:
@@ -142,15 +156,14 @@ class SimulationEngine:
         if log_features.get('recent_errors', 0) > 0 and not active_incidents:
              # Check Cooldown
              if self.tick_count < self.cooldown_until:
-                 # self.log(f"[Engine] Suppression active until {self.cooldown_until}")
                  pass
              else:
                   self.log(f"[Engine] Log Anomaly Detected ({log_features['recent_errors']} errors). Auto-injecting.")
                   # Default to service_down for generic log errors
                   self.inject_incident("service_down", severity="P1")
                 
-        # 4. Agent Logic (Auto-Investigate)
-        # If there is an active incident in DEGRADED mode, trigger Agent
+        # 4. Multi-Agent Analysis Pipeline
+        # If there is an active incident in DEGRADED mode, trigger the Orchestrator
         active_list = self.state_tracker.get_active()
         
         for incident in active_list:
@@ -164,68 +177,53 @@ class SimulationEngine:
                 if incident.state == IncidentState.DEGRADED:
                     self.state_tracker.update_incident_state(incident.id, IncidentState.INVESTIGATING, self.tick_count)
                 
-                # Analyze
-                if local_agent:
-                    self.log(f"[Agent] Analyzing Incident {incident.id}...")
+                # Run Multi-Agent Pipeline
+                if local_orchestrator:
+                    self.log(f"[Engine] Dispatching Incident {incident.id} to Multi-Agent Pipeline...")
                     features = self.observation_window.get_features()
-                    if hasattr(local_agent, 'analyze_incident'):
-                         try:
-                             analysis = local_agent.analyze_incident(self.metrics, features, incident_id=incident.id)
-                             
-                             # Store analysis Persistently on the incident
-                             incident.analysis = analysis
-                             
-                             self.metrics['latest_analysis'] = analysis # Backwards compat for now (optional)
-                             self.metrics['agent_active'] = True
-                             
-                             if local_slack and not getattr(incident, 'slack_sent', False):
-                                 self.log(f"[Engine] Sending Slack Alert for {incident.id}")
-                                 # Map analysis fields to what Slack client expects
-                                 top_hyp = analysis.get('hypotheses', [{}])[0]
-                                 slack_data = {
-                                     'summary': analysis.get('summary', 'No details.'),
-                                     'root_cause': top_hyp.get('root_cause', 'Unknown'),
-                                     'action': analysis.get('top_recommendation', 'Escalate'),
-                                     'confidence': top_hyp.get('confidence', 0.0),
-                                     'severity': analysis.get('severity', 'P2'),
-                                 }
-                                 resp = local_slack.post_incident(slack_data, ticket_id=incident.id)
-                                 self.log(f"[Slack] Response: {resp}")
-                                 incident.slack_sent = True
-                                 
-                             # Create Jira Ticket (Auto)
-                             if local_jira and not incident.jira_ticket_key:
-                                 self.log(f"[Engine] Creating Jira Ticket for {incident.id} (MockMode={local_jira.mock})")
-                                 
-                                 # Better Summary: Type + Root Cause Snippet
-                                 root_cause_short = analysis.get('root_cause', 'Unknown Issue')[:100]
-                                 jira_summary = f"[AI Ops] {incident.type.value} - {root_cause_short}"
-                                 
-                                 # Construct detailed description
-                                 raw_summary = analysis.get('summary', "No details.")
-                                 jira_description = (
-                                     f"**Root Cause Analysis**\n{analysis.get('root_cause')}\n\n"
-                                     f"**Symptoms**\n{raw_summary}\n\n"
-                                     f"**Recommended Action**\n{analysis.get('top_recommendation')}"
-                                 )
-                                 
-                                 ticket_key = local_jira.create_ticket({
-                                     'summary': jira_summary,
-                                     'root_cause': jira_description, # Mapping 'root_cause' to 'description' in client
-                                     'severity': 'P2'
-                                 })
-                                 self.log(f"[Engine] Jira Ticket Created: {ticket_key}")
-                                 if ticket_key.startswith("ERROR"):
-                                     self.log(f"[Jira] CRITICAL: Ticket Creation Failed. Debug Info: {ticket_key}")
-                                     incident.jira_ticket_key = None # Don't save garbage
-                                 else:
-                                     incident.jira_ticket_key = ticket_key
-                         except Exception as e:
-                             self.log(f"[Agent Error] Analysis failed: {e}")
-                             import traceback
-                             traceback.print_exc()
+                    
+                    try:
+                        # Context flags for the orchestrator
+                        context = {
+                            'slack_sent': getattr(incident, 'slack_sent', False),
+                            'jira_ticket_key': incident.jira_ticket_key,
+                            'incident_type': incident.type.value
+                        }
+                        
+                        analysis = local_orchestrator.process_incident(
+                            self.metrics, features,
+                            incident_id=incident.id,
+                            context=context
+                        )
+                        
+                        # Store analysis persistently on the incident
+                        incident.analysis = analysis
+                        
+                        self.metrics['latest_analysis'] = analysis
+                        self.metrics['agent_active'] = True
+                        
+                        # Update incident from comms results
+                        if analysis.get('slack_sent') and not getattr(incident, 'slack_sent', False):
+                            incident.slack_sent = True
+                            self.log(f"[Engine] Slack alert sent for {incident.id}")
+                        
+                        if analysis.get('jira_ticket_key') and not incident.jira_ticket_key:
+                            incident.jira_ticket_key = analysis['jira_ticket_key']
+                            self.log(f"[Engine] Jira ticket created: {incident.jira_ticket_key}")
+                        
+                        # Log pipeline summary
+                        stages = analysis.get('workflow_stages', {})
+                        total_ms = analysis.get('pipeline_duration_ms', 0)
+                        self.log(f"[Engine] Pipeline complete ({total_ms:.0f}ms) | "
+                                 f"Severity: {analysis.get('severity')} | "
+                                 f"Action: {analysis.get('top_recommendation')}")
+                        
+                    except Exception as e:
+                        self.log(f"[Agent Error] Pipeline failed: {e}")
+                        import traceback
+                        traceback.print_exc()
                 else:
-                    self.log(f"[Engine] WARNING: Agent is None despite resuscitation.")
+                    self.log(f"[Engine] WARNING: Orchestrator is None.")
 
         # 5. External Polling (Jira Sync)
         # Check if any active incidents have been resolved externally in Jira
@@ -315,8 +313,6 @@ class SimulationEngine:
         
         for step in steps:
             self.log(step)
-            # time.sleep(0.5) # Optional: Pause for effect if not in instant mode?
-            # For now, instant is better for UX, we just dump the logs.
         
         # Resolve Jira
         active = [i for i in self.state_tracker.get_active() if i.id == incident_id]

@@ -1,113 +1,116 @@
-import json
-from src.rag.vector_db import KnowledgeBase
+"""
+RCA Agent v2 - Focused RAG-powered root cause analysis.
+Refactored from monolithic RCAAgent to work within the multi-agent pipeline.
+Receives diagnostic context, queries knowledge base, and returns ranked hypotheses.
+"""
 
-class RCAAgent:
-    def __init__(self):
+from .base_agent import BaseAgent
+from .message_bus import AgentMessage, MessageType
+from .llm_client import LLMClient
+from src.rag.vector_db import KnowledgeBase
+from typing import Optional
+
+
+class RCAAgent(BaseAgent):
+    """
+    v2: Focused solely on RAG-powered root cause analysis.
+    Receives diagnostic context, queries ChromaDB knowledge base,
+    and returns ranked hypotheses with confidence scores.
+    """
+
+    def __init__(self, name: str, bus, llm_client: Optional[LLMClient] = None):
+        super().__init__(name, bus)
         self.kb = KnowledgeBase()
         self.kb.populate('./data/historical_incidents.json')
-        # Placeholder for real LLM client (OpenAI/Ollama)
-        # For this demo, we can simulate the LLM response if no key is provided, 
-        # but the structure will be ready for real integration.
-        self.mock_mode = True 
+        self.llm = llm_client
 
-    def analyze_incident(self, metrics_snapshot, recent_logs, incident_id=None) -> dict:
-        """
-        Ranked Analysis of Incident.
-        """
-        # 1. Summarize
-        symptoms = []
-        if metrics_snapshot.get('cpu_percent', 0) > 80: symptoms.append("High CPU")
-        if metrics_snapshot.get('memory_percent', 0) > 90: symptoms.append("High Memory")
-        if metrics_snapshot.get('latency_seconds', 0) > 2.0: symptoms.append("High Latency")
-        
-        # Log analysis
-        error_count = recent_logs.get('recent_errors', 0)
-        if error_count > 0:
-            symptoms.append(f"{error_count} Errors/sec")
-            
-        # Add actual log text to context (for RAG search)
-        log_samples = recent_logs.get('log_samples', [])
-        evidence_text = ""
-        if log_samples:
-            evidence_text = f"Logs: {'; '.join(log_samples)}"
-            
-        query_context = ", ".join(symptoms) + ". " + evidence_text
-        
-        # Smart Summary Generation
-        # Extract unique component/error types for readability
-        readable_symptoms = list(symptoms) # Copy basic metrics
-        
-        unique_errors = set()
-        for log in log_samples:
-            # Simple heuristic: Extract [Component] or Exception name
-            if "[" in log and "]" in log:
-                try:
-                    comp = log.split("[")[1].split("]")[0]
-                    msg = log.split("]")[1].strip().split(":")[0] # specific error part
-                    if len(msg) > 30: msg = msg[:30] + "..."
-                    unique_errors.add(f"[{comp}] {msg}")
-                except:
-                    pass
-            elif "Exception" in log:
-                unique_errors.add(log.split()[-1].split(":")[-1])
-        
-        if unique_errors:
-            # Natural Language Construction
-            error_list = list(unique_errors)
-            if len(error_list) == 1:
-                readable_symptoms.append(f"Issue appears to be {error_list[0]}")
-            else:
-                readable_symptoms.append(f"Multiple failures detected: {', '.join(error_list[:2])}")
-        elif log_samples:
-             readable_symptoms.append("Application is throwing generic errors")
+    def handle_message(self, message: AgentMessage) -> AgentMessage:
+        diagnostics = message.payload.get('diagnostic_report', {})
+        query_context = diagnostics.get('query_context', '')
+        triage = message.payload.get('triage_report', {})
 
-        # 2. RAG Retrieval
-        rag_results = self.kb.search(query_context, n_results=3) # Get top 3
-        
+        # ---- RAG Retrieval ----
+        rag_results = self.kb.search(query_context, n_results=3)
+        hypotheses = self._formulate_hypotheses(rag_results, query_context)
+
+        # ---- LLM-Enhanced Reasoning ----
+        llm_reasoning = None
+        if self.llm and self.llm.is_active and hypotheses:
+            top = hypotheses[0]
+            llm_reasoning = self.llm.generate(
+                system_prompt=(
+                    "You are an expert SRE performing root cause analysis. "
+                    "Given the symptoms, diagnostics, and a candidate root cause from historical data, "
+                    "provide a detailed reasoning chain explaining WHY this root cause is likely correct. "
+                    "Be specific and reference the evidence. Keep it to 3-4 sentences."
+                ),
+                user_prompt=(
+                    f"Symptoms: {triage.get('symptoms', [])}\n"
+                    f"Diagnostic Summary: {diagnostics.get('readable_summary', '')}\n"
+                    f"Error Patterns: {diagnostics.get('error_patterns', [])}\n"
+                    f"Candidate Root Cause: {top.get('root_cause', 'Unknown')}\n"
+                    f"Historical Match: {top.get('reasoning', '')}\n"
+                    f"Confidence: {top.get('confidence', 0):.2f}"
+                )
+            )
+            if llm_reasoning:
+                # Enhance the top hypothesis reasoning with LLM output
+                hypotheses[0]['reasoning'] = llm_reasoning
+
+        top_root_cause = hypotheses[0] if hypotheses else None
+        rag_match_count = len(rag_results.get('documents', [[]])[0]) if rag_results else 0
+
+        self.log(f"Found {rag_match_count} RAG matches, {len(hypotheses)} hypotheses, "
+                 f"Top confidence: {top_root_cause['confidence']:.2f}" if top_root_cause else "No matches")
+
+        return AgentMessage(
+            type=MessageType.RCA_RESULT,
+            sender=self.name,
+            recipient="orchestrator",
+            incident_id=message.incident_id,
+            payload={
+                'hypotheses': hypotheses,
+                'top_root_cause': top_root_cause,
+                'llm_reasoning': llm_reasoning,
+                'rag_match_count': rag_match_count
+            },
+            parent_message_id=message.id
+        )
+
+    def _formulate_hypotheses(self, rag_results, query_context):
+        """Generate ranked hypotheses from RAG results."""
         hypotheses = []
-        
-        # 3. Formulate Hypotheses
-        if rag_results and rag_results['documents']:
+
+        if rag_results and rag_results.get('documents'):
             for i, doc in enumerate(rag_results['documents'][0]):
                 meta = rag_results['metadatas'][0][i]
                 dist = rag_results['distances'][0][i]
-                
-                # Confidence Score
+
                 confidence = 1.0 / (1.0 + dist)
-                
+
                 hypotheses.append({
                     "root_cause": meta.get('root_cause', 'Unknown'),
                     "action": meta.get('recommended_action', 'Escalate'),
                     "confidence": confidence,
-                    "reasoning": f"Matches similar incident: {meta.get('summary')} (Conf: {confidence:.2f}). Evidence: {query_context[:100]}..."
+                    "reasoning": (
+                        f"Matches historical incident: {meta.get('summary')} "
+                        f"(Confidence: {confidence:.2f}). "
+                        f"Evidence: {query_context[:100]}..."
+                    ),
+                    "historical_id": meta.get('id', 'N/A'),
+                    "resolution": meta.get('resolution', '')
                 })
-        
-        # Fallback if empty (e.g. cold start)
+
+        # Fallback
         if not hypotheses:
             hypotheses.append({
                 "root_cause": "Unknown Anomaly",
                 "action": "Escalate to L3",
                 "confidence": 0.1,
-                "reasoning": "No RAG matches found."
+                "reasoning": "No RAG matches found. Manual investigation required.",
+                "historical_id": "N/A",
+                "resolution": ""
             })
-            
-        # Sort by confidence
+
         hypotheses.sort(key=lambda x: x['confidence'], reverse=True)
-        top = hypotheses[0]
-        
-        # Decision
-        needs_approval = True
-        if top['confidence'] > 0.85 and "Restart" in top['action']:
-             needs_approval = False # Auto-action for very high confidence (example)
-        
-        final_summary = ". ".join(readable_symptoms) + "."
-             
-        return {
-            "incident_id": incident_id,
-            "hypotheses": hypotheses,
-            "top_recommendation": top['action'],
-            "severity": "P2", # placeholder
-            "needs_approval": needs_approval,
-            "summary": final_summary,
-            "evidence": evidence_text 
-        }
+        return hypotheses
