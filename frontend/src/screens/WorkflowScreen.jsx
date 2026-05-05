@@ -6,62 +6,70 @@ const STAGE_KEYS = ['triage', 'diagnostics', 'rca', 'remediation', 'comms'];
 
 /**
  * Replay the agent pipeline on the client. The server returns the whole
- * analysis at once (engine.tick is sync). We animate progress from idle →
- * active → done so the user perceives the walkthrough.
+ * analysis at once, so we animate idle → active → done locally.
  *
- * Returns { reachedIdx, activeIdx, complete } where indexes are positions
- * within STAGE_KEYS.
+ * Re-initializes ONLY when the incident id changes or when the analysis
+ * first becomes complete for this incident. SSE pushes that don't change
+ * either signal are no-ops.
  */
-function usePipelineReplay(incidentId, stages, retried) {
+function usePipelineReplay(incidentId, allComplete, retried) {
   const [step, setStep] = useState(0);
-  const [phase, setPhase] = useState('idle'); // 'forward' | 'retry' | 'done' | 'idle'
-  const lastIdRef = useRef(null);
+  const [phase, setPhase] = useState('idle');
+  const [replayKey, setReplayKey] = useState(0);
+  const stateRef = useRef({ id: null, key: -1, complete: false });
+  const timerRef = useRef(null);
 
   useEffect(() => {
-    if (!incidentId || !stages || !STAGE_KEYS.every(k => stages[k]?.status === 'complete')) {
+    const s = stateRef.current;
+    const completeFlip = !s.complete && allComplete && s.id === incidentId;
+    const need = (s.id !== incidentId) || (s.key !== replayKey) || completeFlip;
+    if (!need) return;
+    s.id = incidentId;
+    s.key = replayKey;
+    s.complete = allComplete;
+
+    if (timerRef.current) clearTimeout(timerRef.current);
+    timerRef.current = null;
+
+    if (!incidentId || !allComplete) {
       setStep(0);
       setPhase('idle');
-      lastIdRef.current = null;
       return;
     }
-    // Restart replay only when the incident changes
-    if (lastIdRef.current === incidentId) return;
-    lastIdRef.current = incidentId;
-    setStep(0);
-    setPhase('forward');
 
-    // Build the timeline of "events" we'll step through:
-    //   forward:  triage → diag → rca
-    //   if retried:  rca-loop-back, diag, rca
-    //   continue:  remed → comms
     const events = ['triage', 'diagnostics', 'rca'];
     if (retried) events.push('retry-back', 'diagnostics', 'rca');
     events.push('remediation', 'comms', 'done');
 
     let i = 0;
-    const tick = () => {
+    setStep(0);
+    setPhase('forward');
+
+    const advance = () => {
       i += 1;
-      if (i >= events.length) {
-        setPhase('done');
-        return;
-      }
+      if (i >= events.length) { setPhase('done'); return; }
       const ev = events[i];
       if (ev === 'retry-back') {
         setPhase('retry');
       } else if (ev === 'done') {
         setPhase('done');
+        return;
       } else {
         setPhase(p => (p === 'retry' ? 'forward' : p));
         const idx = STAGE_KEYS.indexOf(ev);
         if (idx >= 0) setStep(idx);
       }
-      timer = setTimeout(tick, ev === 'retry-back' ? 900 : 700);
+      timerRef.current = setTimeout(advance, ev === 'retry-back' ? 900 : 700);
     };
-    let timer = setTimeout(tick, 700);
-    return () => clearTimeout(timer);
-  }, [incidentId, stages, retried]);
+    timerRef.current = setTimeout(advance, 700);
+  }, [incidentId, allComplete, retried, replayKey]);
 
-  return { step, phase };
+  useEffect(() => () => {
+    if (timerRef.current) clearTimeout(timerRef.current);
+  }, []);
+
+  const replay = () => setReplayKey(k => k + 1);
+  return { step, phase, replay };
 }
 
 export function WorkflowScreen({ state, selected, selectedId, onSelect }) {
@@ -72,8 +80,11 @@ export function WorkflowScreen({ state, selected, selectedId, onSelect }) {
   const retried = !!stages?.rca?.retried;
   const conversation = a?.agent_conversation || [];
   const waiting = incident && !a;
+  const allComplete = !!a && STAGE_KEYS.every(k => stages?.[k]?.status === 'complete');
+  const pState = incident?.pipeline_state || (a ? 'done' : 'queued');
+  const queueAhead = incidents.findIndex(i => i.id === incident?.id);
 
-  const { step, phase } = usePipelineReplay(incident?.id, stages, retried);
+  const { step, phase, replay } = usePipelineReplay(incident?.id, allComplete, retried);
 
   return (
     <div className="page" style={{ maxWidth: 1480 }}>
@@ -92,7 +103,10 @@ export function WorkflowScreen({ state, selected, selectedId, onSelect }) {
               {incidents.map(inc => {
                 const sev = inc.analysis?.severity || 'P2';
                 const active = inc.id === incident?.id;
-                const ready = !!inc.analysis;
+                const pState = inc.pipeline_state || (inc.analysis ? 'done' : 'queued');
+                const dotColor = pState === 'done' ? 'var(--green)'
+                  : pState === 'running' ? 'var(--amber)' : 'var(--ink-3)';
+                const isPulse = pState === 'running';
                 return (
                   <button
                     key={inc.id}
@@ -105,9 +119,9 @@ export function WorkflowScreen({ state, selected, selectedId, onSelect }) {
                       color: active ? 'var(--bg)' : 'var(--ink-2)',
                       padding: '5px 12px',
                     }}
+                    title={`${pState}`}
                   >
-                    <span className={`dot ${ready ? '' : 'pulse'}`}
-                      style={{ background: ready ? 'var(--green)' : 'var(--amber)' }}></span>
+                    <span className={`dot ${isPulse ? 'pulse' : ''}`} style={{ background: dotColor }}></span>
                     <span className="mono-xs">{inc.id}</span>
                     <span style={{ opacity: 0.85 }}>· {inc.type.replaceAll('_', ' ')}</span>
                     <span className={`chip ${severityTone(sev)}`} style={{ padding: '0 6px', fontSize: 10 }}>{sev}</span>
@@ -115,6 +129,17 @@ export function WorkflowScreen({ state, selected, selectedId, onSelect }) {
                 );
               })}
             </div>
+            {(() => {
+              const queued = incidents.filter(i => i.pipeline_state === 'queued').length;
+              const running = incidents.filter(i => i.pipeline_state === 'running').length;
+              if (!queued && !running) return null;
+              return (
+                <span className="mono-xs muted" style={{ marginLeft: 'auto' }}>
+                  {running > 0 && <>● <strong>{running}</strong> running &nbsp;</>}
+                  {queued > 0 && <>○ {queued} queued</>}
+                </span>
+              );
+            })()}
           </div>
         </div>
       )}
@@ -132,10 +157,14 @@ export function WorkflowScreen({ state, selected, selectedId, onSelect }) {
           display: 'flex', alignItems: 'center', gap: 8,
           fontSize: 12, color: 'var(--ink-3)',
         }}>
-          {waiting && (<><span className="dot amber pulse"></span> Waiting for first analysis…</>)}
+          {waiting && pState === 'running' && (<><span className="dot amber pulse"></span> Pipeline running for this incident…</>)}
+          {waiting && pState === 'queued' && (<><span className="dot"></span> Queued · {queueAhead} ahead in line</>)}
           {!waiting && phase === 'forward' && (<><span className="dot amber pulse"></span> Running stage {step + 1} / 5</>)}
           {!waiting && phase === 'retry' && (<><span className="dot" style={{ background: 'var(--red)' }}></span> Low confidence · re-diagnosing</>)}
           {!waiting && phase === 'done' && a && (<><span className="dot" style={{ background: 'var(--green)' }}></span> Pipeline complete · {a.pipeline_duration_ms?.toFixed?.(0)}ms</>)}
+          {allComplete && (
+            <button className="btn sm ghost" style={{ marginLeft: 8 }} onClick={replay}>↻ Replay</button>
+          )}
         </div>
       </div>
 

@@ -11,13 +11,16 @@ from typing import Optional
 class LLMClient:
     """
     Unified LLM interface — uses OpenAI-compatible SDK.
-    Provider priority:
-      1. GROQ_API_KEY  → Groq (Llama/Mixtral, fast inference)
-      2. OPENAI_API_KEY → OpenAI (gpt-4o-mini)
-      3. mock mode (rule-based fallback)
+    Provider priority (override with LLM_PROVIDER env: ollama|groq|openai|mock):
+      1. LLM_PROVIDER=ollama   → local Ollama at OLLAMA_BASE_URL (no API key needed)
+      2. LLM_PROVIDER=mock     → force rule-based fallback
+      3. GROQ_API_KEY set      → Groq (Llama/Mixtral, fast inference)
+      4. OPENAI_API_KEY set    → OpenAI (gpt-4o-mini)
+      5. otherwise             → mock mode
     """
 
     def __init__(self, api_key: Optional[str] = None, model: Optional[str] = None):
+        forced = (os.getenv("LLM_PROVIDER") or "").lower().strip()
         groq_key = os.getenv("GROQ_API_KEY")
         openai_key = os.getenv("OPENAI_API_KEY")
 
@@ -26,12 +29,22 @@ class LLMClient:
             self.api_key = api_key
             self.base_url = None
             self.model = model or "gpt-4o-mini"
-        elif groq_key:
+        elif forced == "mock":
+            self.provider = None
+            self.api_key = None
+            self.base_url = None
+            self.model = model or "mock"
+        elif forced == "ollama" or (not forced and os.getenv("OLLAMA_BASE_URL")):
+            self.provider = "ollama"
+            self.api_key = "ollama"  # Ollama ignores it, but the SDK requires non-empty
+            self.base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
+            self.model = model or os.getenv("OLLAMA_MODEL", "llama3.2:3b")
+        elif forced == "groq" or (not forced and groq_key):
             self.provider = "groq"
             self.api_key = groq_key
             self.base_url = "https://api.groq.com/openai/v1"
             self.model = model or os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
-        elif openai_key:
+        elif forced == "openai" or (not forced and openai_key):
             self.provider = "openai"
             self.api_key = openai_key
             self.base_url = None
@@ -50,7 +63,7 @@ class LLMClient:
         if not self.mock_mode:
             try:
                 from openai import OpenAI
-                kwargs = {"api_key": self.api_key}
+                kwargs = {"api_key": self.api_key, "timeout": 30.0, "max_retries": 1}
                 if self.base_url:
                     kwargs["base_url"] = self.base_url
                 self.client = OpenAI(**kwargs)

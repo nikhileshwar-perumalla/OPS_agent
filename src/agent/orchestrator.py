@@ -151,7 +151,7 @@ class OrchestratorAgent:
 
         # ---- Feedback Loop: Low Confidence → Re-diagnose ----
         retried = False
-        top = rca_payload.get('top_root_cause', {})
+        top = rca_payload.get('top_root_cause') or {}
         if top.get('confidence', 0) < 0.3 and diag_payload:
             retried = True
             self.log("[Feedback] Low RCA confidence (<0.3). Requesting expanded diagnostics...")
@@ -193,7 +193,7 @@ class OrchestratorAgent:
             'duration_ms': round((time.time() - stage_start) * 1000, 1),
             'retried': retried,
             'output_summary': f"Hypotheses: {len(rca_payload.get('hypotheses', []))}, "
-                              f"Top confidence: {rca_payload.get('top_root_cause', {}).get('confidence', 0):.2f}"
+                              f"Top confidence: {(rca_payload.get('top_root_cause') or {}).get('confidence', 0):.2f}"
         }
 
         # ================================================================
@@ -229,7 +229,7 @@ class OrchestratorAgent:
         stage_start = time.time()
         self.log("[Phase 5/5] Communications Agent - Sending notifications...")
 
-        top_rc = rca_payload.get('top_root_cause', {})
+        top_rc = rca_payload.get('top_root_cause') or {}
         comms_msg = AgentMessage(
             type=MessageType.COMMS_REQUEST,
             sender="orchestrator",
@@ -319,7 +319,7 @@ class OrchestratorAgent:
         elif msg.type == MessageType.DIAGNOSTICS_RESULT:
             return f"{len(p.get('error_patterns',[]))} patterns, services={p.get('affected_services',[])}"
         elif msg.type == MessageType.RCA_RESULT:
-            top = p.get('top_root_cause', {})
+            top = p.get('top_root_cause') or {}
             return f"{len(p.get('hypotheses',[]))} hypotheses, top={top.get('root_cause','?')[:50]}"
         elif msg.type == MessageType.REMEDIATION_RESULT:
             return f"Action='{p.get('recommended_action')}', safety={p.get('safety_status')}"

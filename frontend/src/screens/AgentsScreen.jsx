@@ -3,10 +3,11 @@ import { AGENTS, severityTone } from '../agents.js';
 import { api } from '../api.js';
 import { PlaybookModal, extractPlaybookSteps } from '../components/PlaybookModal.jsx';
 
-export function AgentsScreen({ state, refresh, selected }) {
+export function AgentsScreen({ state, refresh, selected, selectedId, onSelect }) {
   const [activeId, setActiveId] = useState('triage');
   const [playbook, setPlaybook] = useState(null);
-  const incident = selected || state?.incidents?.[0];
+  const incidents = state?.incidents ?? [];
+  const incident = selected || incidents[0];
   const a = incident?.analysis;
 
   const runAction = async (kind, inc) => {
@@ -29,16 +30,50 @@ export function AgentsScreen({ state, refresh, selected }) {
             <span>{ag.emoji}</span>{ag.name}
           </div>
         ))}
-        <div className="side-section">On incident</div>
-        <div className="side-item mono-xs">{incident?.id || 'none'}</div>
+        <div className="side-section">Incident · {incidents.length}</div>
+        {incidents.length === 0 && (
+          <div className="muted mono-xs" style={{ padding: '4px 10px' }}>none active</div>
+        )}
+        {incidents.map(inc => {
+          const sev = inc.analysis?.severity || 'P2';
+          const active = inc.id === incident?.id;
+          const pState = inc.pipeline_state || (inc.analysis ? 'done' : 'queued');
+          const dotColor = pState === 'done' ? 'var(--green)'
+            : pState === 'running' ? 'var(--amber)' : 'var(--ink-3)';
+          const isPulse = pState === 'running';
+          return (
+            <div
+              key={inc.id}
+              className={`side-item ${active ? 'active' : ''}`}
+              onClick={() => onSelect?.(inc.id)}
+              style={{ alignItems: 'flex-start', flexDirection: 'column', gap: 2 }}
+              title={pState}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, width: '100%' }}>
+                <span className={`dot ${isPulse ? 'pulse' : ''}`} style={{ background: dotColor }}></span>
+                <span className="mono-xs">{inc.id}</span>
+                <span className={`chip ${severityTone(sev)}`} style={{ marginLeft: 'auto', padding: '0 6px', fontSize: 10 }}>{sev}</span>
+              </div>
+              <div style={{ fontSize: 11.5, color: active ? 'var(--bg)' : 'var(--ink-3)', paddingLeft: 13, display: 'flex', justifyContent: 'space-between', width: '100%' }}>
+                <span>{inc.type.replaceAll('_', ' ')}</span>
+                {pState !== 'done' && (
+                  <span className="mono-xs" style={{ fontSize: 10, opacity: 0.8 }}>{pState}</span>
+                )}
+              </div>
+            </div>
+          );
+        })}
       </div>
       <div className="main">
         <AgentHeader agent={AGENTS.find(x => x.id === activeId)} state={state} incident={incident} />
-        {activeId === 'triage' && <TriagePanel a={a} />}
-        {activeId === 'diagnostics' && <DiagnosticsPanel a={a} />}
-        {activeId === 'rca' && <RCAPanel a={a} />}
-        {activeId === 'remediation' && <RemediationPanel a={a} incident={incident} runAction={runAction} />}
-        {activeId === 'comms' && <CommsPanel a={a} incident={incident} />}
+        {!incident && (
+          <div className="empty">No incidents yet. Inject one from the <strong>Sim</strong> tab to see agent reports.</div>
+        )}
+        {incident && activeId === 'triage' && <TriagePanel a={a} incident={incident} />}
+        {incident && activeId === 'diagnostics' && <DiagnosticsPanel a={a} incident={incident} />}
+        {incident && activeId === 'rca' && <RCAPanel a={a} incident={incident} />}
+        {incident && activeId === 'remediation' && <RemediationPanel a={a} incident={incident} runAction={runAction} />}
+        {incident && activeId === 'comms' && <CommsPanel a={a} incident={incident} />}
       </div>
       {playbook && (
         <PlaybookModal
@@ -54,7 +89,11 @@ export function AgentsScreen({ state, refresh, selected }) {
 
 function AgentHeader({ agent, state, incident }) {
   if (!agent) return null;
-  const llm = state?.llm_active;
+  const llmStats = state?.agent_stats?.llm;
+  const llmActive = state?.llm_active;
+  const llmLabel = llmActive
+    ? `${llmStats?.provider || 'llm'} · ${llmStats?.model || ''}`.trim()
+    : 'rule-based';
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 22 }}>
       <div style={{
@@ -69,19 +108,36 @@ function AgentHeader({ agent, state, incident }) {
       </div>
       <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
         {incident && <span className="chip"><span className="dot amber pulse"></span>active on {incident.id}</span>}
-        <span className="chip">{llm ? 'LLM · gpt-4o-mini' : 'rule-based'}</span>
+        <span className="chip">{llmLabel}</span>
       </div>
     </div>
   );
 }
 
-function Empty({ msg = 'No data — pipeline idle.' }) {
-  return <div className="empty">{msg}</div>;
+function Empty({ msg = 'No data — pipeline idle.', incident }) {
+  // Differentiate "no incident at all" vs "incident exists but analysis pending"
+  const realMsg = incident && !incident.analysis
+    ? 'Pipeline running for this incident — analysis will appear in a few seconds.'
+    : msg;
+  return (
+    <div className="empty">
+      {incident && !incident.analysis && (
+        <div style={{ marginBottom: 8 }}>
+          <span className="dot amber pulse"></span>
+          <span style={{ marginLeft: 8 }}>Waiting for first analysis…</span>
+        </div>
+      )}
+      <div style={{ fontSize: 13 }}>{realMsg}</div>
+    </div>
+  );
 }
 
-function TriagePanel({ a }) {
+function TriagePanel({ a, incident }) {
   const t = a?.triage_report;
-  if (!t) return <Empty />;
+  if (!t) return <Empty incident={incident} />;
+  const allSymptoms = t.symptoms || [];
+  const symChips = allSymptoms.filter(s => typeof s === 'string' && s.length <= 60);
+  const symLong = allSymptoms.filter(s => typeof s === 'string' && s.length > 60);
   return (
     <div className="grid-2">
       <div className="card">
@@ -91,15 +147,38 @@ function TriagePanel({ a }) {
           <span className="mono-xs muted">urgency · {t.urgency_score?.toFixed?.(2) ?? '—'}</span>
         </div>
       </div>
-      <div className="card">
+      <div className="card" style={{ minWidth: 0 }}>
         <div className="card-title">Symptoms</div>
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 8 }}>
-          {(t.symptoms || []).map((s, i) => <span key={i} className="chip amber">{s}</span>)}
+          {symChips.map((s, i) => <span key={i} className="chip amber">{s}</span>)}
+          {symChips.length === 0 && symLong.length === 0 && (
+            <span className="muted" style={{ fontSize: 13 }}>—</span>
+          )}
         </div>
       </div>
-      <div className="card" style={{ gridColumn: 'span 2' }}>
+      {symLong.length > 0 && (
+        <div className="card" style={{ gridColumn: 'span 2' }}>
+          <div className="card-title">AI insight</div>
+          {symLong.map((s, i) => (
+            <blockquote key={i} style={{
+              margin: '8px 0 0', padding: '10px 14px',
+              borderLeft: '3px solid var(--accent)',
+              background: 'var(--accent-soft)',
+              borderRadius: 4,
+              fontSize: 13.5, lineHeight: 1.6,
+              color: 'var(--ink-2)',
+              fontStyle: 'italic',
+              whiteSpace: 'pre-wrap',
+              wordBreak: 'break-word',
+            }}>
+              {s.replace(/^\[AI Insight\]\s*/, '')}
+            </blockquote>
+          ))}
+        </div>
+      )}
+      <div className="card" style={{ gridColumn: 'span 2', minWidth: 0 }}>
         <div className="card-title">Reasoning</div>
-        <div style={{ fontSize: 13.5, lineHeight: 1.6, marginTop: 8, color: 'var(--ink-2)' }}>
+        <div style={{ fontSize: 13.5, lineHeight: 1.6, marginTop: 8, color: 'var(--ink-2)', wordBreak: 'break-word' }}>
           {t.reasoning || a?.summary || '—'}
         </div>
       </div>
@@ -107,9 +186,9 @@ function TriagePanel({ a }) {
   );
 }
 
-function DiagnosticsPanel({ a }) {
+function DiagnosticsPanel({ a, incident }) {
   const d = a?.diagnostic_report;
-  if (!d) return <Empty />;
+  if (!d) return <Empty incident={incident} />;
   return (
     <div className="grid-2">
       <div className="card" style={{ gridColumn: 'span 2' }}>
@@ -145,9 +224,9 @@ function DiagnosticsPanel({ a }) {
   );
 }
 
-function RCAPanel({ a }) {
+function RCAPanel({ a, incident }) {
   const r = a?.rca_report;
-  if (!r) return <Empty />;
+  if (!r) return <Empty incident={incident} />;
   const top = r.top_root_cause;
   return (
     <div className="grid-2">
@@ -212,7 +291,7 @@ function RCAPanel({ a }) {
 
 function RemediationPanel({ a, incident, runAction }) {
   const r = a?.remediation_plan;
-  if (!r) return <Empty />;
+  if (!r) return <Empty incident={incident} />;
   const safety = r.safety_status;
   return (
     <>
@@ -249,7 +328,7 @@ function RemediationPanel({ a, incident, runAction }) {
 }
 
 function CommsPanel({ a, incident }) {
-  if (!a) return <Empty />;
+  if (!a) return <Empty incident={incident} />;
   const slackSent = a.slack_sent || incident?.slack_sent;
   const jira = incident?.jira_ticket_key;
   return (

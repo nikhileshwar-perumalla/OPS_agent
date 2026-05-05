@@ -97,14 +97,43 @@ class EngineRuntime:
     def snapshot(self) -> dict:
         eng = self.engine
         active = eng.state_tracker.get_active()
+        running_id = getattr(eng, "pipeline_running_id", None)
+
+        # Compute per-incident queue state.
+        incidents = []
+        seen_running = False
+        for inc in active:
+            data = _serialize_incident(inc)
+            if data["analysis"]:
+                data["pipeline_state"] = "done"
+            elif running_id and data["id"] == running_id:
+                data["pipeline_state"] = "running"
+                seen_running = True
+            else:
+                # If something's running already, others are queued.
+                # Otherwise this one is itself next-in-line (running soon).
+                data["pipeline_state"] = "queued" if seen_running or running_id else "running"
+            incidents.append(data)
+
+        # Strip references to analysis from metrics — those would alias incidents'
+        # analysis dicts and confuse the cycle-detection in _safe().
+        metrics_clean = {k: v for k, v in (eng.metrics or {}).items()
+                         if k not in ("latest_analysis", "agent_active")}
+        history_clean = [
+            {k: v for k, v in (s.get("metrics", {}) or {}).items()
+             if k not in ("latest_analysis", "agent_active")}
+            for s in self.tick_history[-60:]
+        ]
+
         return {
             "tick": eng.tick_count,
             "mode": eng.mode.value,
             "auto_run": self.auto_run,
             "llm_active": bool(eng.llm_client and eng.llm_client.is_active),
-            "metrics": eng.metrics,
-            "metrics_history": [s.get("metrics", {}) for s in self.tick_history[-60:]],
-            "incidents": [_serialize_incident(i) for i in active],
+            "pipeline_running_id": running_id,
+            "metrics": metrics_clean,
+            "metrics_history": history_clean,
+            "incidents": incidents,
             "logs": list(eng.system_logs[-80:]),
             "agent_stats": eng.orchestrator.get_agent_stats() if eng.orchestrator else {},
         }
@@ -149,6 +178,7 @@ def _serialize_incident(inc) -> dict:
         "jira_ticket_key": getattr(inc, "jira_ticket_key", None),
         "slack_sent": getattr(inc, "slack_sent", False),
         "analysis": inc.analysis,
+        "history": [(t, s.value) for t, s in (getattr(inc, "history", []) or [])],
     }
 
 
@@ -253,6 +283,89 @@ async def events():
             await asyncio.sleep(0.5)
 
     return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+@app.get("/api/history")
+def get_history():
+    eng = runtime.engine
+    resolved = list(getattr(eng.state_tracker, "resolved_log", []))
+    items = [_serialize_incident(i) for i in resolved]
+    items.reverse()  # newest first
+
+    # Compute KPIs
+    total = len(resolved) + len(eng.state_tracker.get_active())
+    auto_resolved = sum(
+        1 for i in resolved
+        if i.state.value == "RESOLVED"
+        and not (i.analysis and i.analysis.get("needs_approval"))
+    )
+    durations = [
+        (i.history[-1][0] - i.start_tick) if getattr(i, "history", None) else 0
+        for i in resolved
+    ]
+    avg_ticks = (sum(durations) / len(durations)) if durations else 0
+
+    return json_response({
+        "kpis": {
+            "incidents": total,
+            "resolved": len(resolved),
+            "auto_resolved": auto_resolved,
+            "avg_ticks": round(avg_ticks, 1),
+        },
+        "items": items,
+    })
+
+
+class KBIngestBody(BaseModel):
+    incident_id: str
+
+
+@app.post("/api/kb/ingest")
+def kb_ingest(body: KBIngestBody):
+    """Add a resolved incident to the ChromaDB knowledge base."""
+    eng = runtime.engine
+    inc = next(
+        (i for i in getattr(eng.state_tracker, "resolved_log", [])
+         if i.id == body.incident_id),
+        None,
+    )
+    if not inc:
+        raise HTTPException(404, f"Resolved incident {body.incident_id} not found")
+    a = inc.analysis or {}
+    try:
+        from src.rag.vector_db import KnowledgeBase
+        kb = KnowledgeBase()
+        root_cause = (a.get('hypotheses') or [{}])[0].get('root_cause', '')
+        text = (
+            f"Title: {a.get('summary','')}. "
+            f"Symptoms: {', '.join(a.get('triage_report', {}).get('symptoms', [])[:5])}. "
+            f"Cause: {root_cause}. "
+            f"Fix: {a.get('top_recommendation','')}."
+        )
+        meta = {
+            "id": f"live-{inc.id}",
+            "summary": a.get("summary", "")[:200],
+            "type": inc.type.value,
+            "severity": a.get("severity", "?"),
+            "root_cause": root_cause,
+            "resolution": a.get("top_recommendation", ""),
+        }
+        kb.collection.add(ids=[f"live-{inc.id}"], documents=[text], metadatas=[meta])
+        return {"ok": True, "indexed_id": f"live-{inc.id}"}
+    except Exception as e:
+        raise HTTPException(500, f"KB ingest failed: {e}")
+
+
+@app.get("/api/kb")
+def get_kb():
+    """Return all historical incidents indexed in the knowledge base."""
+    path = Path(__file__).resolve().parent.parent / "data" / "historical_incidents.json"
+    try:
+        with open(path) as f:
+            incidents = json.load(f)
+    except Exception as e:
+        raise HTTPException(500, f"Failed to load KB: {e}")
+    return json_response({"items": incidents, "count": len(incidents)})
 
 
 @app.get("/api/health")

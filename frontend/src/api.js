@@ -20,6 +20,10 @@ export const api = {
   reanalyze: () => req('/reanalyze', { method: 'POST' }),
   injectLogs: (text) =>
     req('/logs/inject', { method: 'POST', body: JSON.stringify({ text }) }),
+  history: () => req('/history'),
+  kb: () => req('/kb'),
+  kbIngest: (incident_id) =>
+    req('/kb/ingest', { method: 'POST', body: JSON.stringify({ incident_id }) }),
 };
 
 export function subscribeEvents(onState) {

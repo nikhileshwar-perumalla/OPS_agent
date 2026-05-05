@@ -1,29 +1,57 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { api } from '../api.js';
 import { severityTone } from '../agents.js';
 import { Sparkline } from '../components/Sparkline.jsx';
+import { PlaybookModal } from '../components/PlaybookModal.jsx';
 
 // ---------- Knowledge ----------
-const KB_DEMO = [
-  { id: 'INC-1827', t: 'orders-db pool exhaustion', sev: 'P1' },
-  { id: 'INC-1612', t: 'query plan flip', sev: 'P2' },
-  { id: 'INC-1991', t: 'gateway circuit cascade', sev: 'P2' },
-  { id: 'INC-2003', t: 'replica lag → reads stalled', sev: 'P2' },
-  { id: 'INC-1450', t: 'auth latency p99 spike', sev: 'P3' },
-  { id: 'INC-1399', t: 'CDN cache miss', sev: 'P3' },
-  { id: 'INC-1287', t: 'memory leak payments-svc', sev: 'P1' },
-];
-
 export function KnowledgeScreen() {
-  const [sel, setSel] = useState(KB_DEMO[0]);
+  const [items, setItems] = useState([]);
+  const [sel, setSel] = useState(null);
+  const [query, setQuery] = useState('');
+
+  useEffect(() => {
+    api.kb()
+      .then(d => {
+        setItems(d.items || []);
+        if (d.items?.length) setSel(d.items[0]);
+      })
+      .catch(() => setItems([]));
+  }, []);
+
+  const filtered = items.filter(i => {
+    if (!query) return true;
+    const q = query.toLowerCase();
+    return (
+      i.id?.toLowerCase().includes(q) ||
+      i.summary?.toLowerCase().includes(q) ||
+      i.root_cause?.toLowerCase().includes(q)
+    );
+  });
+
+  if (!sel) {
+    return (
+      <div style={{ padding: 28 }}>
+        <h2 className="serif">ChromaDB</h2>
+        <div className="muted">{items.length === 0 ? 'Loading knowledge base…' : 'No incidents found.'}</div>
+      </div>
+    );
+  }
+
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: '280px 1fr 320px', minHeight: 'calc(100vh - 60px)' }}>
-      <div style={{ borderRight: '1px solid var(--line)', padding: 16, background: 'var(--bg)' }}>
+    <div style={{ display: 'grid', gridTemplateColumns: '300px 1fr 320px', minHeight: 'calc(100vh - 60px)' }}>
+      <div style={{ borderRight: '1px solid var(--line)', padding: 16, background: 'var(--bg)', overflow: 'auto', maxHeight: 'calc(100vh - 60px)' }}>
         <h2 className="serif" style={{ fontSize: 20, margin: 0 }}>ChromaDB</h2>
-        <div className="muted mono-xs" style={{ marginBottom: 10 }}>21 incidents indexed</div>
-        <input type="search" placeholder="Search…" style={{ width: '100%', marginBottom: 10 }} />
+        <div className="muted mono-xs" style={{ marginBottom: 10 }}>{items.length} incidents indexed</div>
+        <input
+          type="search"
+          placeholder="Search…"
+          value={query}
+          onChange={e => setQuery(e.target.value)}
+          style={{ width: '100%', marginBottom: 10 }}
+        />
         <div className="col" style={{ gap: 6 }}>
-          {KB_DEMO.map(i => (
+          {filtered.map(i => (
             <button
               key={i.id}
               className="card"
@@ -33,44 +61,44 @@ export function KnowledgeScreen() {
                 borderColor: sel.id === i.id ? 'var(--ink)' : 'var(--line)',
               }}>
               <div className="mono-xs muted">{i.id}</div>
-              <div style={{ fontSize: 13 }}>{i.t}</div>
-              <span className={`chip ${severityTone(i.sev)}`} style={{ marginTop: 4 }}>{i.sev}</span>
+              <div style={{ fontSize: 13 }}>{i.summary}</div>
+              <span className={`chip ${severityTone(i.severity)}`} style={{ marginTop: 4 }}>{i.severity}</span>
             </button>
           ))}
         </div>
       </div>
 
       <div style={{ padding: 28, overflow: 'auto' }}>
-        <h1>{sel.id} · {sel.t}</h1>
+        <h1>{sel.id} · {sel.summary}</h1>
         <div style={{ display: 'flex', gap: 8, marginBottom: 18 }}>
-          <span className={`chip ${severityTone(sel.sev)}`}>{sel.sev}</span>
+          <span className={`chip ${severityTone(sel.severity)}`}>{sel.severity}</span>
           <span className="chip">resolved</span>
-          <span className="chip">32d ago</span>
           <span className="chip violet">embedding · text-3-small</span>
         </div>
         <div className="grid-2">
           <div className="card">
-            <div className="card-title">Symptoms</div>
-            <ul style={{ margin: '8px 0 0 18px', fontSize: 13.5, lineHeight: 1.65 }}>
-              <li>5xx surge checkout-svc</li>
-              <li>p99 latency 8× baseline</li>
-              <li>PoolExhaustedException</li>
-            </ul>
+            <div className="card-title">Logs signature</div>
+            <div style={{ fontSize: 13.5, lineHeight: 1.65, marginTop: 8, fontFamily: 'monospace' }}>
+              {sel.logs_signature || '—'}
+            </div>
           </div>
           <div className="card">
+            <div className="card-title">Recommended action</div>
+            <div style={{ fontSize: 13.5, lineHeight: 1.65, marginTop: 8 }}>
+              {sel.recommended_action || '—'}
+            </div>
+          </div>
+          <div className="card" style={{ gridColumn: 'span 2' }}>
             <div className="card-title">Root cause</div>
             <div style={{ fontSize: 13.5, lineHeight: 1.65, marginTop: 8 }}>
-              Pool size (20) too small after marketing-driven traffic 3×; long queries held connections.
+              {sel.root_cause}
             </div>
           </div>
           <div className="card" style={{ gridColumn: 'span 2' }}>
             <div className="card-title">Resolution</div>
-            <ol style={{ margin: '8px 0 0 18px', fontSize: 13.5, lineHeight: 1.65 }}>
-              <li>scaled checkout replicas +3</li>
-              <li>restarted pool</li>
-              <li>raised maxConn 20 → 50</li>
-              <li>added pool-utilization alert at 70%</li>
-            </ol>
+            <div style={{ fontSize: 13.5, lineHeight: 1.65, marginTop: 8 }}>
+              {sel.resolution}
+            </div>
           </div>
           <div className="card" style={{ gridColumn: 'span 2' }}>
             <div className="card-title">Embedding · vector preview</div>
@@ -78,7 +106,7 @@ export function KnowledgeScreen() {
               {Array.from({ length: 64 }).map((_, i) => (
                 <div key={i} style={{
                   flex: 1,
-                  height: `${20 + Math.abs(Math.sin(i * 0.7)) * 80}%`,
+                  height: `${20 + Math.abs(Math.sin(i * 0.7 + (sel.id?.length || 0))) * 80}%`,
                   background: 'var(--ink-2)', borderRadius: 1,
                 }} />
               ))}
@@ -96,82 +124,178 @@ export function KnowledgeScreen() {
         </div>
         <div className="card-title" style={{ marginTop: 18 }}>Index health</div>
         <div style={{ fontSize: 13.5, lineHeight: 1.7, marginTop: 6, color: 'var(--ink-2)' }}>
-          docs · 21<br />last reindex · 6h ago<br />avg query · 312ms<br />collection · incidents-v2
+          docs · {items.length}<br />avg query · 312ms<br />collection · incidents-v2
         </div>
       </div>
     </div>
   );
 }
 
-// ---------- History ----------
-const HIST_DEMO = [
-  { id: 'INC-2038', t: 'Auth latency p99', d: '2d ago', mttr: '3m 41s', sev: 'P3', cause: 'JWT verifier cache TTL too short' },
-  { id: 'INC-2032', t: 'Payments timeout cascade', d: '5d ago', mttr: '8m 12s', sev: 'P1', cause: 'Upstream gateway slow + missing retry budget' },
-  { id: 'INC-2027', t: 'CDN purge propagation', d: '9d ago', mttr: '2m 04s', sev: 'P2', cause: 'Stale config in 1/3 edge regions' },
-];
-
+// ---------- History (real data from /api/history) ----------
 export function HistoryScreen() {
+  const [data, setData] = useState(null);
+  const [replay, setReplay] = useState(null); // { incident, kind, steps }
+  const [kbStatus, setKbStatus] = useState({}); // { [id]: 'pending' | 'ok' | 'err' }
+
+  const refresh = async () => {
+    try { setData(await api.history()); } catch (e) { console.warn(e); }
+  };
+  useEffect(() => {
+    refresh();
+    const id = setInterval(refresh, 5000);
+    return () => clearInterval(id);
+  }, []);
+
+  const items = data?.items ?? [];
+  const kpis = data?.kpis ?? {};
+
+  const onReplay = (inc) => {
+    const steps = buildResolutionSteps(inc);
+    const kind = inc.state === 'ESCALATED' ? 'deny' : 'approve';
+    setReplay({ incident: inc, kind, steps });
+  };
+
+  const onAddToKB = async (inc) => {
+    setKbStatus(s => ({ ...s, [inc.id]: 'pending' }));
+    try {
+      await api.kbIngest(inc.id);
+      setKbStatus(s => ({ ...s, [inc.id]: 'ok' }));
+    } catch (e) {
+      setKbStatus(s => ({ ...s, [inc.id]: 'err' }));
+    }
+  };
+
   return (
     <div className="page">
       <h1>History · post-mortems</h1>
-      <div className="subtitle">Long-term incident patterns and resolution playbooks.</div>
+      <div className="subtitle">
+        {items.length > 0
+          ? `Real resolved incidents from this session (${items.length} so far).`
+          : 'No resolved incidents yet — approve or deny one in Live to populate this view.'}
+      </div>
 
       <div className="grid-4" style={{ marginBottom: 18 }}>
-        {[
-          ['Incidents', 47],
-          ['Auto-resolved', 31],
-          ['Avg MTTR', '4m 12s'],
-          ['Agent accuracy', '88%'],
-        ].map(([k, v]) => (
-          <div key={k} className="card kpi">
-            <div className="k">{k}</div>
-            <div className="v">{v}</div>
-          </div>
-        ))}
+        <Kpi k="Incidents (total)" v={kpis.incidents ?? 0} />
+        <Kpi k="Resolved" v={kpis.resolved ?? 0} />
+        <Kpi k="Auto-resolved" v={kpis.auto_resolved ?? 0} />
+        <Kpi k="Avg ticks to resolve" v={kpis.avg_ticks ?? '—'} />
       </div>
 
-      <div className="card">
-        <div className="card-title" style={{ marginBottom: 8 }}>Timeline · last 30d</div>
-        <svg viewBox="0 0 800 80" style={{ width: '100%' }}>
-          <line x1="0" y1="50" x2="800" y2="50" stroke="var(--line-2)" strokeWidth="1.4" />
-          {[0,1,0,0,2,0,1,0,0,3,1,0,0,0,1,2,0,0,1,0,0,0,1,4,1,0,0,1,2,1].map((n, i) =>
-            Array.from({ length: n }).map((_, j) => (
-              <circle
-                key={`${i}-${j}`}
-                cx={(i / 29) * 760 + 20}
-                cy={50 - j * 8 - 6}
-                r="3.5"
-                fill={['var(--red)', 'var(--amber)', 'var(--green)'][(i + j) % 3]}
-              />
-            ))
-          )}
-          {[0, 7, 14, 21, 28].map(d => (
-            <text key={d} x={(d / 29) * 760 + 20} y="72" textAnchor="middle" fontFamily="var(--mono)" fontSize="9" fill="var(--ink-3)">d-{29 - d}</text>
-          ))}
-        </svg>
-      </div>
+      {items.length > 0 && (
+        <div className="card" style={{ marginBottom: 18 }}>
+          <div className="card-title" style={{ marginBottom: 8 }}>Resolution timeline</div>
+          <ResolutionDots items={items} />
+        </div>
+      )}
 
-      <h2 className="serif" style={{ fontSize: 20, marginTop: 28, marginBottom: 12 }}>Post-mortems</h2>
+      <h2 className="serif" style={{ fontSize: 20, marginTop: 18, marginBottom: 12 }}>Post-mortems</h2>
+      {items.length === 0 && (
+        <div className="empty">No post-mortems yet.</div>
+      )}
       <div className="col">
-        {HIST_DEMO.map(p => (
-          <div key={p.id} className="card">
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-              <span className={`chip ${severityTone(p.sev)}`}>{p.sev}</span>
-              <span className="mono-xs muted">{p.id}</span>
-              <span style={{ fontSize: 14, fontWeight: 600 }}>{p.t}</span>
-              <span className="mono-xs muted" style={{ marginLeft: 'auto' }}>{p.d} · MTTR {p.mttr}</span>
+        {items.map(p => {
+          const sev = p.analysis?.severity || 'P2';
+          const summary = p.analysis?.summary || '—';
+          const root = p.analysis?.hypotheses?.[0]?.root_cause || '—';
+          const ticks = p.history?.length ? (p.history[p.history.length - 1][0] - p.start_tick) : null;
+          const escalated = p.state === 'ESCALATED';
+          const kbS = kbStatus[p.id];
+          return (
+            <div key={p.id} className="card">
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                <span className={`chip ${severityTone(sev)}`}>{sev}</span>
+                <span className="mono-xs muted">{p.id}</span>
+                <span style={{ fontSize: 14, fontWeight: 600 }}>{p.type.replaceAll('_', ' ')}</span>
+                {escalated && <span className="chip red">escalated</span>}
+                {p.jira_ticket_key && <span className="chip blue">{p.jira_ticket_key}</span>}
+                <span className="mono-xs muted" style={{ marginLeft: 'auto' }}>
+                  resolved at tick {p.history?.[p.history.length - 1]?.[0] ?? '?'} · {ticks != null ? `${ticks} ticks` : '—'}
+                </span>
+              </div>
+              <div style={{ fontSize: 13, color: 'var(--ink-2)', marginTop: 8 }}>↳ {root}</div>
+              <div style={{ fontSize: 12.5, color: 'var(--ink-3)', marginTop: 4 }}>{summary}</div>
+              <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+                <button className="btn sm" onClick={() => onReplay(p)}>Replay timeline</button>
+                <button className="btn sm ghost" disabled title="Not implemented">Export PDF</button>
+                <button
+                  className={`btn sm ${kbS === 'ok' ? 'accent' : 'ghost'}`}
+                  onClick={() => onAddToKB(p)}
+                  disabled={kbS === 'pending' || kbS === 'ok'}
+                >
+                  {kbS === 'pending' ? 'Adding…' : kbS === 'ok' ? '✓ Added to KB' : kbS === 'err' ? 'Retry' : 'Add to KB'}
+                </button>
+              </div>
             </div>
-            <div style={{ fontSize: 13, color: 'var(--ink-2)', marginTop: 8 }}>↳ {p.cause}</div>
-            <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
-              <button className="btn sm">Replay timeline</button>
-              <button className="btn sm ghost">Export PDF</button>
-              <button className="btn sm ghost">Add to KB</button>
-            </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
+
+      {replay && (
+        <PlaybookModal
+          incident={replay.incident}
+          kind={replay.kind}
+          steps={replay.steps}
+          onClose={() => setReplay(null)}
+        />
+      )}
     </div>
   );
+}
+
+function Kpi({ k, v }) {
+  return (
+    <div className="card kpi">
+      <div className="k">{k}</div>
+      <div className="v">{v}</div>
+    </div>
+  );
+}
+
+function ResolutionDots({ items }) {
+  if (!items.length) return null;
+  const ticks = items.map(i => i.history?.[i.history.length - 1]?.[0] || i.start_tick);
+  const minT = Math.min(...ticks);
+  const maxT = Math.max(...ticks);
+  const span = Math.max(maxT - minT, 1);
+  return (
+    <svg viewBox="0 0 800 80" style={{ width: '100%' }}>
+      <line x1="0" y1="50" x2="800" y2="50" stroke="var(--line-2)" strokeWidth="1.4" />
+      {items.map((inc, i) => {
+        const t = inc.history?.[inc.history.length - 1]?.[0] || inc.start_tick;
+        const x = ((t - minT) / span) * 760 + 20;
+        const tone = severityTone(inc.analysis?.severity || 'P2');
+        const fill = tone === 'red' ? 'var(--red)' : tone === 'amber' ? 'var(--amber)' : 'var(--green)';
+        return (
+          <g key={inc.id}>
+            <circle cx={x} cy="50" r="4" fill={fill} stroke="var(--ink)" strokeWidth="0.6">
+              <title>{`${inc.id} · ${inc.type} · tick ${t}`}</title>
+            </circle>
+          </g>
+        );
+      })}
+      <text x="20" y="72" fontFamily="var(--mono)" fontSize="9" fill="var(--ink-3)">tick {minT}</text>
+      <text x="780" y="72" textAnchor="end" fontFamily="var(--mono)" fontSize="9" fill="var(--ink-3)">tick {maxT}</text>
+    </svg>
+  );
+}
+
+function buildResolutionSteps(inc) {
+  const a = inc.analysis || {};
+  const out = [];
+  out.push(`Detected ${inc.type.replaceAll('_', ' ')} at tick ${inc.start_tick}`);
+  if (a.severity) out.push(`Triage classified as ${a.severity}`);
+  const symptoms = a.triage_report?.symptoms?.slice(0, 3) || [];
+  if (symptoms.length) out.push(`Symptoms: ${symptoms.join(', ')}`);
+  const cause = a.hypotheses?.[0]?.root_cause;
+  if (cause) {
+    const conf = Math.round((a.hypotheses[0].confidence || 0) * 100);
+    out.push(`RCA top hypothesis (${conf}%): ${cause}`);
+  }
+  if (a.top_recommendation) out.push(`Recommended action: ${a.top_recommendation}`);
+  if (inc.jira_ticket_key) out.push(`Jira ticket ${inc.jira_ticket_key} created`);
+  out.push(inc.state === 'ESCALATED' ? 'User denied → escalated to L3' : 'User approved → executed playbook');
+  out.push(`Final state: ${inc.state}`);
+  return out;
 }
 
 // ---------- Sim ----------
@@ -279,79 +403,3 @@ function SignalCell({ label, series, value, suffix = '%' }) {
   );
 }
 
-// ---------- Settings ----------
-export function SettingsScreen() {
-  const [section, setSection] = useState('policy');
-  return (
-    <div className="split">
-      <div className="side">
-        <div className="side-section">Settings</div>
-        {[
-          ['policy', 'Policy engine'],
-          ['llm', 'LLM mode'],
-          ['integrations', 'Integrations'],
-          ['agents', 'Agents'],
-          ['notifications', 'Notifications'],
-          ['audit', 'Audit log'],
-        ].map(([k, l]) => (
-          <div key={k} className={`side-item ${section === k ? 'active' : ''}`} onClick={() => setSection(k)}>
-            {l}
-          </div>
-        ))}
-      </div>
-      <div className="main">
-        {section === 'policy' && <PolicySettings />}
-        {section !== 'policy' && (
-          <>
-            <h1 style={{ textTransform: 'capitalize' }}>{section}</h1>
-            <div className="empty">Configuration UI placeholder.</div>
-          </>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function PolicySettings() {
-  const classes = [
-    { c: 'safe', tone: 'green', d: 'auto-execute', actions: ['scale +N', 'rotate logs', 'clear cache'] },
-    { c: 'risky', tone: 'amber', d: 'human approval required', actions: ['restart service', 'pool resize', 'failover'] },
-    { c: 'forbidden', tone: 'red', d: 'never auto-attempted', actions: ['drop table', 'rm -rf', 'rotate prod keys'] },
-  ];
-  return (
-    <>
-      <h1>Policy engine</h1>
-      <div className="subtitle">Classifies actions safe / risky / forbidden — gates remediation autonomy.</div>
-      <h2 className="serif" style={{ fontSize: 18, marginTop: 18 }}>Action classes</h2>
-      <div className="col">
-        {classes.map(p => (
-          <div key={p.c} className="card">
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-              <span className={`chip ${p.tone}`}>{p.c}</span>
-              <span className="mono-xs muted">{p.d}</span>
-            </div>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 10 }}>
-              {p.actions.map(a => <span key={a} className="chip">{a}</span>)}
-              <span className="chip" style={{ borderStyle: 'dashed' }}>+ add</span>
-            </div>
-          </div>
-        ))}
-      </div>
-      <h2 className="serif" style={{ fontSize: 18, marginTop: 22 }}>Approval thresholds</h2>
-      <div className="card">
-        <div className="grid-3">
-          {[
-            ['auto-execute below', 'P3'],
-            ['min RCA confidence', '70%'],
-            ['max blast radius', '1 service'],
-          ].map(([k, v]) => (
-            <div key={k}>
-              <div className="label">{k}</div>
-              <div className="serif" style={{ fontSize: 22, fontWeight: 600 }}>{v}</div>
-            </div>
-          ))}
-        </div>
-      </div>
-    </>
-  );
-}

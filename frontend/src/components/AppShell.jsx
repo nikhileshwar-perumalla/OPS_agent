@@ -7,7 +7,6 @@ const TABS = [
   { id: 'knowledge', label: 'Knowledge' },
   { id: 'history', label: 'History' },
   { id: 'sim', label: 'Sim' },
-  { id: 'settings', label: 'Settings' },
 ];
 
 export function AppShell({ tab, onTab, state, children }) {

@@ -34,7 +34,7 @@ class CommunicationsAgent(BaseAgent):
         summary = payload.get('summary', 'No details.')
         severity = payload.get('severity', 'P2')
         top_recommendation = payload.get('top_recommendation', 'Escalate')
-        top_hypothesis = payload.get('top_hypothesis', {})
+        top_hypothesis = payload.get('top_hypothesis') or {}
         root_cause = top_hypothesis.get('root_cause', 'Unknown')
         confidence = top_hypothesis.get('confidence', 0.0)
 

@@ -14,7 +14,12 @@ class JiraConnector:
         if not self.mock and url and username and token:
             if JIRA:
                 try:
-                    self.client = JIRA(server=url, basic_auth=(username, token))
+                    self.client = JIRA(
+                        server=url,
+                        basic_auth=(username, token),
+                        timeout=15,
+                        max_retries=1,
+                    )
                     print(f"Connected to Jira: {url}")
                 except Exception as e:
                     print(f"Failed to connect to Jira: {e}")

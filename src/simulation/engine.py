@@ -38,6 +38,7 @@ class SimulationEngine:
         self.message_bus = MessageBus()
         self.orchestrator = None
         self.llm_client = None
+        self.pipeline_running_id = None
         
         # External dependencies (to be set)
         self.log_source = None
@@ -163,15 +164,23 @@ class SimulationEngine:
                   self.inject_incident("service_down", severity="P1")
                 
         # 4. Multi-Agent Analysis Pipeline
-        # If there is an active incident in DEGRADED mode, trigger the Orchestrator
+        # Process at most ONE eligible incident per tick so the engine loop
+        # stays responsive and the UI sees progress incrementally.
         active_list = self.state_tracker.get_active()
-        
-        for incident in active_list:
+        self.pipeline_running_id = None
+        eligible = [
+            i for i in active_list
+            if i.state == IncidentState.DEGRADED
+            or (i.state == IncidentState.INVESTIGATING and i.analysis is None)
+        ]
+
+        for incident in eligible[:1]:
              # Logic checks
              cond1 = (incident.state == IncidentState.DEGRADED)
              cond2 = (incident.state == IncidentState.INVESTIGATING)
              cond3 = (incident.analysis is None)
-             
+             self.pipeline_running_id = incident.id
+
              if cond1 or (cond2 and cond3):
                 # Transition to INVESTIGATING if needed
                 if incident.state == IncidentState.DEGRADED:
@@ -219,8 +228,11 @@ class SimulationEngine:
                                  f"Action: {analysis.get('top_recommendation')}")
                         
                     except Exception as e:
-                        self.log(f"[Agent Error] Pipeline failed: {e}")
                         import traceback
+                        tb = traceback.format_exc().strip().splitlines()
+                        self.log(f"[Agent Error] Pipeline failed: {e}")
+                        for line in tb[-4:]:
+                            self.log(f"[Agent Error]   {line}")
                         traceback.print_exc()
                 else:
                     self.log(f"[Engine] WARNING: Orchestrator is None.")

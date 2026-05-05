@@ -24,7 +24,7 @@ class RemediationAgent(BaseAgent):
         rca_report = message.payload.get('rca_report', {})
         triage_report = message.payload.get('triage_report', {})
         incident_type = message.payload.get('incident_type', 'unknown')
-        top = rca_report.get('top_root_cause', {})
+        top = rca_report.get('top_root_cause') or {}
 
         recommended_action = top.get('action', 'Escalate to L3')
         confidence = top.get('confidence', 0.0)

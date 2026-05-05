@@ -217,6 +217,10 @@ a { color: inherit; }
   color: var(--ink-2);
   font-size: 12px;
   font-weight: 500;
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .chip.red { background: var(--red-soft); border-color: transparent; color: var(--red); }
 .chip.amber { background: var(--amber-soft); border-color: transparent; color: var(--amber); }

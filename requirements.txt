@@ -4,8 +4,6 @@ scikit-learn
 chromadb
 langchain
 langchain-community
-streamlit
-plotly
 watchdog
 flask
 pyngrok

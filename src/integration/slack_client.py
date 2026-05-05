@@ -72,7 +72,7 @@ class SlackNotifier:
             }
         else:
             try:
-                response = requests.post(self.webhook_url, json={'blocks': blocks})
+                response = requests.post(self.webhook_url, json={'blocks': blocks}, timeout=10)
                 if response.status_code == 200:
                     return {"ok": True, "mock": False, "payload": blocks}
                 else:

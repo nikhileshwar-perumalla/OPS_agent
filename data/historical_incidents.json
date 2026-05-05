@@ -1,191 +1,281 @@
 [
-    {
-        "id": "INC-001",
-        "summary": "High CPU utilization impacting API latency",
-        "root_cause": "Runaway process in the data ingestion pipeline consuming excessive threads.",
-        "resolution": "Restarted the data-ingestion service and applied a patch to limit thread pool size.",
-        "logs_signature": "CPU > 90%, 504 Gateway Timeout",
-        "recommended_action": "Restart Service",
-        "severity": "P2"
-    },
-    {
-        "id": "INC-002",
-        "summary": "Memory leak in user profile microservice",
-        "root_cause": "Improper caching strategy caused objects to retain in heap memory linearly.",
-        "resolution": "Performed a rolling restart of the profile service to clear memory. Scheduled code fix for cache eviction.",
-        "logs_signature": "Memory > 95%, OOMKilled",
-        "recommended_action": "Restart Service",
-        "severity": "P2"
-    },
-    {
-        "id": "INC-003",
-        "summary": "Database connection pool exhaustion leading to 500 errors",
-        "root_cause": "Application not releasing connections back to the pool properly during high concurrency.",
-        "resolution": "Scaled up the database read replicas and increased connection pool max size.",
-        "logs_signature": "HTTP 500, 'Connection refused', 'Pool exhausted'",
-        "recommended_action": "Scale Resources",
-        "severity": "P1"
-    },
-    {
-        "id": "INC-004",
-        "summary": "Frontend static assets incorrectly cached causing 404s",
-        "root_cause": "CDN cache invalidation failed after deployment.",
-        "resolution": "Purged CDN cache and rolled back to previous frontend build.",
-        "logs_signature": "HTTP 404 on /static/js",
-        "recommended_action": "Rollback Deployment",
-        "severity": "P3"
-    },
-    {
-        "id": "INC-005",
-        "summary": "Service totally unresponsive",
-        "root_cause": "Load balancer misconfiguration dropped all health checks.",
-        "resolution": "Corrected LB health check path.",
-        "logs_signature": "CPU 0%, HTTP 503",
-        "recommended_action": "Escalate to L3",
-        "severity": "P1"
-    },
-    {
-        "id": "INC-006",
-        "summary": "Redis Cache Stampede causing DB spike",
-        "root_cause": "Redis keys expired simultaneously, causing massive concurrent DB reads.",
-        "resolution": "Implemented jitter in expiration times and warmed up cache.",
-        "logs_signature": "DB CPU > 80%, Redis Miss Rate > 90%",
-        "recommended_action": "Scale Resources",
-        "severity": "P2"
-    },
-    {
-        "id": "INC-007",
-        "summary": "Disk Space Exhaustion on Log Server",
-        "root_cause": "Debug logging left enabled in production filled up /var/log.",
-        "resolution": "Rotated logs, deleted old archives, and disabled debug mode.",
-        "logs_signature": "Disk Usage > 98%, 'No space left on device'",
-        "recommended_action": "Run Cleanup Script",
-        "severity": "P3"
-    },
-    {
-        "id": "INC-008",
-        "summary": "Kafka Consumer Lag increasing due to large message size",
-        "root_cause": "Producer sending messages >10MB, blocking consumers.",
-        "resolution": "Increased consumer fetch.max.bytes and max.partition.fetch.bytes.",
-        "logs_signature": "Consumer Lag > 100k, 'RecordTooLargeException'",
-        "recommended_action": "Tune Config",
-        "severity": "P2"
-    },
-    {
-        "id": "INC-009",
-        "summary": "Kubernetes Pod CrashLoopBackOff after config change",
-        "root_cause": "Typo in environment variable name in deployment YAML.",
-        "resolution": "corrected environment variable key.",
-        "logs_signature": "CrashLoopBackOff, 'KeyError: DB_HOST'",
-        "recommended_action": "Rollback Deployment",
-        "severity": "P2"
-    },
-    {
-        "id": "INC-010",
-        "summary": "Deadlock in PostgreSQL Database",
-        "root_cause": "Two transactions updating rows in reverse order.",
-        "resolution": "Killed blocking pid and refactored prompt application logic.",
-        "logs_signature": "HTTP 500, 'Deadlock detected', 'Process 1234 wait'",
-        "recommended_action": "Restart Service",
-        "severity": "P2"
-    },
-    {
-        "id": "INC-011",
-        "summary": "API Rate Limiting false positives",
-        "root_cause": "Rate limiter Redis node failed, falling back to local memory with lower limits.",
-        "resolution": "Restored Redis connection.",
-        "logs_signature": "HTTP 429 Too Many Requests, 'Redis Connection Error'",
-        "recommended_action": "Restart Service",
-        "severity": "P3"
-    },
-    {
-        "id": "INC-012",
-        "summary": "DNS Resolution Latency Spikes",
-        "root_cause": "CoreDNS pods overloaded on the node.",
-        "resolution": "Scaled CoreDNS autoscaler min replicas.",
-        "logs_signature": "Latency > 5s, 'Temporary failure in name resolution'",
-        "recommended_action": "Scale Resources",
-        "severity": "P2"
-    },
-    {
-        "id": "INC-013",
-        "summary": "Elasticsearch Cluster Yellow Status",
-        "root_cause": "Unassigned shards due to disk watermark threshold reached.",
-        "resolution": "Added storage nodes and triggered shard reroute.",
-        "logs_signature": "ES Status Yellow, 'flood stage disk watermark'",
-        "recommended_action": "Scale Resources",
-        "severity": "P3"
-    },
-    {
-        "id": "INC-014",
-        "summary": "Slow SQL Queries impacting reporting dashboard",
-        "root_cause": "Missing index on 'created_at' column in large table.",
-        "resolution": "Added missing index concurrently.",
-        "logs_signature": "Slow Query Log > 10s, 'Seq Scan on Orders'",
-        "recommended_action": "Run Database Optimization",
-        "severity": "P3"
-    },
-    {
-        "id": "INC-015",
-        "summary": "Payments Gateway SSL Certificate Expired",
-        "root_cause": "Auto-renewal cron job failed due to permission error.",
-        "resolution": "Manually renewed cert and fixed cron permissions.",
-        "logs_signature": "HTTP 502, 'CERT_HAS_EXPIRED'",
-        "recommended_action": "Escalate to L3",
-        "severity": "P1"
-    },
-    {
-        "id": "INC-016",
-        "summary": "Intermittent Packet Loss between App and DB",
-        "root_cause": "Flapping network interface on the database switch.",
-        "resolution": "Network team replaced the faulty switch port.",
-        "logs_signature": "SocketTimeout, 'No route to host' (intermittent)",
-        "recommended_action": "Escalate to L3",
-        "severity": "P2"
-    },
-    {
-        "id": "INC-017",
-        "summary": "High Disk I/O Wait causing slow startups",
-        "root_cause": "Noisy neighbor on the shared virtualization host.",
-        "resolution": "Migrated VM to a dedicated host.",
-        "logs_signature": "iowait > 40%, 'blocked for more than 120 seconds'",
-        "recommended_action": "Escalate to L3",
-        "severity": "P3"
-    },
-    {
-        "id": "INC-018",
-        "summary": "Payment API 3rd Party Failure",
-        "root_cause": "Upstream provider Stripe/PayPal outage.",
-        "resolution": "Enabled circuit breaker pattern to fail fast and queue payments.",
-        "logs_signature": "HTTP 503 from Upstream, 'Connection Timed Out'",
-        "recommended_action": "Enable Circuit Breaker",
-        "severity": "P1"
-    },
-    {
-        "id": "INC-019",
-        "summary": "Java Heap Space Out of Memory",
-        "root_cause": "Memory leak in report generation module.",
-        "resolution": "Captured Heap Dump and Restarted Service.",
-        "logs_signature": "java.lang.OutOfMemoryError: Java heap space",
-        "recommended_action": "Restart Service",
-        "severity": "P2"
-    },
-    {
-        "id": "INC-020",
-        "summary": "Zombie Processes consuming PID limit",
-        "root_cause": "Parent process crashing without reaping children.",
-        "resolution": "Manually killed zombie processes and patched parent service.",
-        "logs_signature": "Running PIDs > 30000, 'fork: retry: Resource temporarily unavailable'",
-        "recommended_action": "Restart Service",
-        "severity": "P2"
-    },
-    {
-        "id": "INC-021",
-        "summary": "Nginx 413 Request Entity Too Large",
-        "root_cause": "Client trying to upload 50MB file when limit is 10MB.",
-        "resolution": "Updated Nginx client_max_body_size config.",
-        "logs_signature": "HTTP 413, 'client intended to send too large body'",
-        "recommended_action": "Tune Config",
-        "severity": "P3"
-    }
+  {
+    "id": "INC-001",
+    "summary": "High CPU utilization impacting API latency",
+    "root_cause": "Runaway process in the data ingestion pipeline consuming excessive threads.",
+    "resolution": "Restarted the data-ingestion service and applied a patch to limit thread pool size.",
+    "logs_signature": "CPU > 90%, 504 Gateway Timeout",
+    "recommended_action": "Restart Service",
+    "severity": "P2"
+  },
+  {
+    "id": "INC-002",
+    "summary": "Memory leak in user profile microservice",
+    "root_cause": "Improper caching strategy caused objects to retain in heap memory linearly.",
+    "resolution": "Performed a rolling restart of the profile service to clear memory. Scheduled code fix for cache eviction.",
+    "logs_signature": "Memory > 95%, OOMKilled",
+    "recommended_action": "Restart Service",
+    "severity": "P2"
+  },
+  {
+    "id": "INC-003",
+    "summary": "Database connection pool exhaustion leading to 500 errors",
+    "root_cause": "Application not releasing connections back to the pool properly during high concurrency.",
+    "resolution": "Scaled up the database read replicas and increased connection pool max size.",
+    "logs_signature": "HTTP 500, 'Connection refused', 'Pool exhausted'",
+    "recommended_action": "Scale Resources",
+    "severity": "P1"
+  },
+  {
+    "id": "INC-004",
+    "summary": "Frontend static assets incorrectly cached causing 404s",
+    "root_cause": "CDN cache invalidation failed after deployment.",
+    "resolution": "Purged CDN cache and rolled back to previous frontend build.",
+    "logs_signature": "HTTP 404 on /static/js",
+    "recommended_action": "Rollback Deployment",
+    "severity": "P3"
+  },
+  {
+    "id": "INC-005",
+    "summary": "Service totally unresponsive",
+    "root_cause": "Load balancer misconfiguration dropped all health checks.",
+    "resolution": "Corrected LB health check path.",
+    "logs_signature": "CPU 0%, HTTP 503",
+    "recommended_action": "Escalate to L3",
+    "severity": "P1"
+  },
+  {
+    "id": "INC-006",
+    "summary": "Redis Cache Stampede causing DB spike",
+    "root_cause": "Redis keys expired simultaneously, causing massive concurrent DB reads.",
+    "resolution": "Implemented jitter in expiration times and warmed up cache.",
+    "logs_signature": "DB CPU > 80%, Redis Miss Rate > 90%",
+    "recommended_action": "Scale Resources",
+    "severity": "P2"
+  },
+  {
+    "id": "INC-007",
+    "summary": "Disk Space Exhaustion on Log Server",
+    "root_cause": "Debug logging left enabled in production filled up /var/log.",
+    "resolution": "Rotated logs, deleted old archives, and disabled debug mode.",
+    "logs_signature": "Disk Usage > 98%, 'No space left on device'",
+    "recommended_action": "Run Cleanup Script",
+    "severity": "P3"
+  },
+  {
+    "id": "INC-008",
+    "summary": "Kafka Consumer Lag increasing due to large message size",
+    "root_cause": "Producer sending messages >10MB, blocking consumers.",
+    "resolution": "Increased consumer fetch.max.bytes and max.partition.fetch.bytes.",
+    "logs_signature": "Consumer Lag > 100k, 'RecordTooLargeException'",
+    "recommended_action": "Tune Config",
+    "severity": "P2"
+  },
+  {
+    "id": "INC-009",
+    "summary": "Kubernetes Pod CrashLoopBackOff after config change",
+    "root_cause": "Typo in environment variable name in deployment YAML.",
+    "resolution": "corrected environment variable key.",
+    "logs_signature": "CrashLoopBackOff, 'KeyError: DB_HOST'",
+    "recommended_action": "Rollback Deployment",
+    "severity": "P2"
+  },
+  {
+    "id": "INC-010",
+    "summary": "Deadlock in PostgreSQL Database",
+    "root_cause": "Two transactions updating rows in reverse order.",
+    "resolution": "Killed blocking pid and refactored prompt application logic.",
+    "logs_signature": "HTTP 500, 'Deadlock detected', 'Process 1234 wait'",
+    "recommended_action": "Restart Service",
+    "severity": "P2"
+  },
+  {
+    "id": "INC-011",
+    "summary": "API Rate Limiting false positives",
+    "root_cause": "Rate limiter Redis node failed, falling back to local memory with lower limits.",
+    "resolution": "Restored Redis connection.",
+    "logs_signature": "HTTP 429 Too Many Requests, 'Redis Connection Error'",
+    "recommended_action": "Restart Service",
+    "severity": "P3"
+  },
+  {
+    "id": "INC-012",
+    "summary": "DNS Resolution Latency Spikes",
+    "root_cause": "CoreDNS pods overloaded on the node.",
+    "resolution": "Scaled CoreDNS autoscaler min replicas.",
+    "logs_signature": "Latency > 5s, 'Temporary failure in name resolution'",
+    "recommended_action": "Scale Resources",
+    "severity": "P2"
+  },
+  {
+    "id": "INC-013",
+    "summary": "Elasticsearch Cluster Yellow Status",
+    "root_cause": "Unassigned shards due to disk watermark threshold reached.",
+    "resolution": "Added storage nodes and triggered shard reroute.",
+    "logs_signature": "ES Status Yellow, 'flood stage disk watermark'",
+    "recommended_action": "Scale Resources",
+    "severity": "P3"
+  },
+  {
+    "id": "INC-014",
+    "summary": "Slow SQL Queries impacting reporting dashboard",
+    "root_cause": "Missing index on 'created_at' column in large table.",
+    "resolution": "Added missing index concurrently.",
+    "logs_signature": "Slow Query Log > 10s, 'Seq Scan on Orders'",
+    "recommended_action": "Run Database Optimization",
+    "severity": "P3"
+  },
+  {
+    "id": "INC-015",
+    "summary": "Payments Gateway SSL Certificate Expired",
+    "root_cause": "Auto-renewal cron job failed due to permission error.",
+    "resolution": "Manually renewed cert and fixed cron permissions.",
+    "logs_signature": "HTTP 502, 'CERT_HAS_EXPIRED'",
+    "recommended_action": "Escalate to L3",
+    "severity": "P1"
+  },
+  {
+    "id": "INC-016",
+    "summary": "Intermittent Packet Loss between App and DB",
+    "root_cause": "Flapping network interface on the database switch.",
+    "resolution": "Network team replaced the faulty switch port.",
+    "logs_signature": "SocketTimeout, 'No route to host' (intermittent)",
+    "recommended_action": "Escalate to L3",
+    "severity": "P2"
+  },
+  {
+    "id": "INC-017",
+    "summary": "High Disk I/O Wait causing slow startups",
+    "root_cause": "Noisy neighbor on the shared virtualization host.",
+    "resolution": "Migrated VM to a dedicated host.",
+    "logs_signature": "iowait > 40%, 'blocked for more than 120 seconds'",
+    "recommended_action": "Escalate to L3",
+    "severity": "P3"
+  },
+  {
+    "id": "INC-018",
+    "summary": "Payment API 3rd Party Failure",
+    "root_cause": "Upstream provider Stripe/PayPal outage.",
+    "resolution": "Enabled circuit breaker pattern to fail fast and queue payments.",
+    "logs_signature": "HTTP 503 from Upstream, 'Connection Timed Out'",
+    "recommended_action": "Enable Circuit Breaker",
+    "severity": "P1"
+  },
+  {
+    "id": "INC-019",
+    "summary": "Java Heap Space Out of Memory",
+    "root_cause": "Memory leak in report generation module.",
+    "resolution": "Captured Heap Dump and Restarted Service.",
+    "logs_signature": "java.lang.OutOfMemoryError: Java heap space",
+    "recommended_action": "Restart Service",
+    "severity": "P2"
+  },
+  {
+    "id": "INC-020",
+    "summary": "Zombie Processes consuming PID limit",
+    "root_cause": "Parent process crashing without reaping children.",
+    "resolution": "Manually killed zombie processes and patched parent service.",
+    "logs_signature": "Running PIDs > 30000, 'fork: retry: Resource temporarily unavailable'",
+    "recommended_action": "Restart Service",
+    "severity": "P2"
+  },
+  {
+    "id": "INC-021",
+    "summary": "Nginx 413 Request Entity Too Large",
+    "root_cause": "Client trying to upload 50MB file when limit is 10MB.",
+    "resolution": "Updated Nginx client_max_body_size config.",
+    "logs_signature": "HTTP 413, 'client intended to send too large body'",
+    "recommended_action": "Tune Config",
+    "severity": "P3"
+  },
+  {
+    "id": "INC-022",
+    "summary": "Redis connection pool exhausted on cart-svc",
+    "root_cause": "Cart service held Redis connections during long checkout flows; pool size of 20 saturated under burst traffic.",
+    "resolution": "Increased pool size to 60, added 5s idle timeout, and enabled connection reuse.",
+    "logs_signature": "redis.exceptions.ConnectionError, ConnectionPool exhausted",
+    "recommended_action": "Scale Pool",
+    "severity": "P1"
+  },
+  {
+    "id": "INC-023",
+    "summary": "Kafka consumer lag spiked on payments topic",
+    "root_cause": "A single partition had a hot key causing one consumer to fall behind by 200k messages.",
+    "resolution": "Repartitioned topic from 6 to 24 partitions and rebalanced consumer group.",
+    "logs_signature": "consumer lag > 100000, partition skew warning",
+    "recommended_action": "Rebalance Partitions",
+    "severity": "P2"
+  },
+  {
+    "id": "INC-024",
+    "summary": "TLS certificate expired on api.gateway",
+    "root_cause": "Cert auto-renewal cron was disabled during migration and no monitor was set up.",
+    "resolution": "Renewed cert manually, restored cert-manager, and added 14-day expiry alert.",
+    "logs_signature": "x509: certificate has expired or is not yet valid",
+    "recommended_action": "Renew Certificate",
+    "severity": "P1"
+  },
+  {
+    "id": "INC-025",
+    "summary": "Disk full on logging-node-3",
+    "root_cause": "Log rotation policy stopped firing after a logrotate config typo.",
+    "resolution": "Fixed logrotate config, truncated old logs, added free-disk alert at 85%.",
+    "logs_signature": "No space left on device, write failed",
+    "recommended_action": "Free Disk Space",
+    "severity": "P2"
+  },
+  {
+    "id": "INC-026",
+    "summary": "DNS resolution timeout for internal services",
+    "root_cause": "CoreDNS pod OOM-killed; default replica count of 1 left no failover.",
+    "resolution": "Scaled CoreDNS to 3 replicas with anti-affinity and raised memory limit to 256Mi.",
+    "logs_signature": "lookup failed: i/o timeout, NXDOMAIN",
+    "recommended_action": "Scale CoreDNS",
+    "severity": "P1"
+  },
+  {
+    "id": "INC-027",
+    "summary": "S3 upload failures from media-service",
+    "root_cause": "IAM role policy was tightened and lost s3:PutObject on the uploads bucket.",
+    "resolution": "Restored s3:PutObject permission, added IaC drift detection.",
+    "logs_signature": "AccessDenied: User is not authorized to perform: s3:PutObject",
+    "recommended_action": "Restore IAM Policy",
+    "severity": "P2"
+  },
+  {
+    "id": "INC-028",
+    "summary": "Memory leak in image-processing worker",
+    "root_cause": "PIL Image objects were not closed in batch loop; RSS grew 50MB/min.",
+    "resolution": "Wrapped image opens in context managers and added a 1GB RSS hard restart.",
+    "logs_signature": "OOMKilled, container restart loop",
+    "recommended_action": "Patch Worker",
+    "severity": "P2"
+  },
+  {
+    "id": "INC-029",
+    "summary": "Stale read in user-profile API",
+    "root_cause": "Read replica was serving stale data 90s behind primary after failover.",
+    "resolution": "Pinned profile reads to primary for 5min post-failover; added replica lag alert.",
+    "logs_signature": "replica_lag_seconds > 60",
+    "recommended_action": "Reroute to Primary",
+    "severity": "P3"
+  },
+  {
+    "id": "INC-030",
+    "summary": "Webhook delivery storm to partner endpoint",
+    "root_cause": "Retry policy retried failed webhooks every 5s indefinitely without backoff.",
+    "resolution": "Added exponential backoff with jitter and a 10-attempt cap.",
+    "logs_signature": "webhook_retry_count exploding, partner 429 responses",
+    "recommended_action": "Apply Backoff",
+    "severity": "P2"
+  },
+  {
+    "id": "INC-031",
+    "summary": "Search index out of sync with primary DB",
+    "root_cause": "Elasticsearch indexer crashed silently; CDC events queued for 6 hours.",
+    "resolution": "Restarted indexer, replayed CDC backlog, added health check on indexer lag.",
+    "logs_signature": "indexer_lag_seconds > 3600, ES doc count diverged",
+    "recommended_action": "Restart Indexer",
+    "severity": "P2"
+  }
 ]

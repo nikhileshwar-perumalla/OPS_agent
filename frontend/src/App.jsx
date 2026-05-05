@@ -3,7 +3,7 @@ import { AppShell } from './components/AppShell.jsx';
 import { LiveScreen } from './screens/LiveScreen.jsx';
 import { WorkflowScreen } from './screens/WorkflowScreen.jsx';
 import { AgentsScreen } from './screens/AgentsScreen.jsx';
-import { KnowledgeScreen, HistoryScreen, SimScreen, SettingsScreen } from './screens/MiscScreens.jsx';
+import { KnowledgeScreen, HistoryScreen, SimScreen } from './screens/MiscScreens.jsx';
 import { api, subscribeEvents } from './api.js';
 
 export default function App() {
@@ -51,12 +51,12 @@ export default function App() {
           selectedId={selectedId} onSelect={setSelectedId} />
       )}
       {tab === 'agents' && (
-        <AgentsScreen state={state} refresh={refresh} selected={selected} />
+        <AgentsScreen state={state} refresh={refresh} selected={selected}
+          selectedId={selectedId} onSelect={setSelectedId} />
       )}
       {tab === 'knowledge' && <KnowledgeScreen />}
       {tab === 'history' && <HistoryScreen />}
       {tab === 'sim' && <SimScreen state={state} refresh={refresh} />}
-      {tab === 'settings' && <SettingsScreen />}
     </AppShell>
   );
 }
