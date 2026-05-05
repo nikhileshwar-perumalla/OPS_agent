@@ -43,9 +43,7 @@ class JiraConnector:
                 return new_issue.key
             except Exception as e:
                 print(f"[Jira Error] Create failed: {e}")
-                # Fallback to mock ID if real fails? No, better to return Error or None.
-                # For demo continuity, let's fallback to mock string but log error.
-                return f"{self.project_key}-ERR"
+                return f"ERROR: {str(e)}"
         
         # Mock Logic
         ticket_id = f"{self.project_key}-{random.randint(1000, 9999)}"
@@ -71,20 +69,24 @@ class JiraConnector:
                 # Transitioning status is complex in Jira (needs transition ID).
                 # For this simplified agent, we might just add a comment properly.
                 # Attempting reasonable transition names:
+                # Attempting reasonable transition names:
                 transitions = self.client.transitions(ticket_id)
                 trans_name_map = {t['name'].lower(): t['id'] for t in transitions}
+                print(f"[Jira] Available transitions for {ticket_id}: {list(trans_name_map.keys())}")
                 
                 target_trans = None
                 if status == "RESOLVED":
                     target_trans = trans_name_map.get('done') or trans_name_map.get('resolve') or trans_name_map.get('closed')
                 elif status == "ESCALATED":
-                    # Maybe no transition, just comment.
-                    pass
+                    # Try to find an 'Escalate' workflow, otherwise 'In Progress' with High Priority
+                    target_trans = trans_name_map.get('escalate') or trans_name_map.get('in progress') or trans_name_map.get('to do')
                 
                 if target_trans:
                     self.client.transition_issue(ticket_id, target_trans)
+                    print(f"[Jira] Transitioned {ticket_id} via ID {target_trans}")
                     return True
                 else:
+                    print(f"[Jira] No matching transition found for {status}. Comment added only.")
                     return True # Comment added at least
             except Exception as e:
                 print(f"[Jira Error] Update failed: {e}")
@@ -96,3 +98,20 @@ class JiraConnector:
             print(f"[Jira Mock] Ticket {ticket_id} updated to {status}. Comment: {comment}")
             return True
         return False
+        
+    def get_ticket_status(self, ticket_id):
+        """
+        Retrieves the status of a Jira ticket.
+        """
+        if not self.mock and self.client:
+            try:
+                issue = self.client.issue(ticket_id)
+                return issue.fields.status.name
+            except Exception as e:
+                print(f"[Jira Error] Get status failed: {e}")
+                return None
+                
+        # Mock Logic
+        if ticket_id in self.tickets:
+            return self.tickets[ticket_id]['status']
+        return "OPEN"

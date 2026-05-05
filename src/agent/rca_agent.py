@@ -10,84 +10,104 @@ class RCAAgent:
         # but the structure will be ready for real integration.
         self.mock_mode = True 
 
-    def analyze_incident(self, metrics_snapshot, recent_logs):
+    def analyze_incident(self, metrics_snapshot, recent_logs, incident_id=None) -> dict:
         """
-        Main entry point for the agent.
-        1. Construct context from metrics + logs.
-        2. Query Vector DB for similar past incidents.
-        3. (Mock) Generate LLM response based on inputs.
+        Ranked Analysis of Incident.
         """
-        # 1. Summarize current situation
+        # 1. Summarize
         symptoms = []
-        if metrics_snapshot['cpu_percent'] > 80: symptoms.append("High CPU")
-        if metrics_snapshot['memory_percent'] > 90: symptoms.append("High Memory")
-        if metrics_snapshot['latency_seconds'] > 2.0: symptoms.append("High Latency")
+        if metrics_snapshot.get('cpu_percent', 0) > 80: symptoms.append("High CPU")
+        if metrics_snapshot.get('memory_percent', 0) > 90: symptoms.append("High Memory")
+        if metrics_snapshot.get('latency_seconds', 0) > 2.0: symptoms.append("High Latency")
         
-        error_logs = [l for l in recent_logs if l['level'] in ['ERROR', 'CRITICAL']]
-        if error_logs:
-            symptoms.append(f"{len(error_logs)} Error Logs Found")
-            # Extract unique error messages logic simplified
-            uniq_errs = list(set([l['message'] for l in error_logs]))
-            symptoms.extend(uniq_errs[:2]) # Top 2 errors
-
-        query_context = ", ".join(symptoms)
+        # Log analysis
+        error_count = recent_logs.get('recent_errors', 0)
+        if error_count > 0:
+            symptoms.append(f"{error_count} Errors/sec")
+            
+        # Add actual log text to context (for RAG search)
+        log_samples = recent_logs.get('log_samples', [])
+        evidence_text = ""
+        if log_samples:
+            evidence_text = f"Logs: {'; '.join(log_samples)}"
+            
+        query_context = ", ".join(symptoms) + ". " + evidence_text
         
-        # 2. Retrieve RAG context
-        rag_results = self.kb.search(query_context, n_results=1)
+        # Smart Summary Generation
+        # Extract unique component/error types for readability
+        readable_symptoms = list(symptoms) # Copy basic metrics
         
-        # Defaults
-        past_incident = "No similar history found."
-        params = {}
-        distance = 1.0 # Default high distance (low confidence)
+        unique_errors = set()
+        for log in log_samples:
+            # Simple heuristic: Extract [Component] or Exception name
+            if "[" in log and "]" in log:
+                try:
+                    comp = log.split("[")[1].split("]")[0]
+                    msg = log.split("]")[1].strip().split(":")[0] # specific error part
+                    if len(msg) > 30: msg = msg[:30] + "..."
+                    unique_errors.add(f"[{comp}] {msg}")
+                except:
+                    pass
+            elif "Exception" in log:
+                unique_errors.add(log.split()[-1].split(":")[-1])
         
-        if rag_results and rag_results['documents'] and len(rag_results['documents'][0]) > 0:
-             past_incident = rag_results['documents'][0][0]
-             params = rag_results['metadatas'][0][0]
-             if 'distances' in rag_results and rag_results['distances'][0]:
-                 distance = rag_results['distances'][0][0]
+        if unique_errors:
+            # Natural Language Construction
+            error_list = list(unique_errors)
+            if len(error_list) == 1:
+                readable_symptoms.append(f"Issue appears to be {error_list[0]}")
+            else:
+                readable_symptoms.append(f"Multiple failures detected: {', '.join(error_list[:2])}")
+        elif log_samples:
+             readable_symptoms.append("Application is throwing generic errors")
 
-        # 3. Dynamic Analysis based on RAG
-        # Calculate Confidence: Using inverse distance (Closer = Higher Confidence)
-        # ChromaDB Cosine distance: 0 = exact match, 1 = orthogonal, 2 = opposite.
-        # Simple heuristic: confidence = 1 / (1 + distance)
-        confidence = 1.0 / (1.0 + distance)
+        # 2. RAG Retrieval
+        rag_results = self.kb.search(query_context, n_results=3) # Get top 3
         
-        # Extract Knowledge from Historical Match
-        matched_action = params.get('recommended_action', 'Escalate to L3')
-        matched_cause = params.get('root_cause', 'Unknown Anomaly')
-        matched_severity = params.get('severity', 'P2')
-        matched_summary = params.get('summary', 'Unknown Incident')
-
-        analysis_text = f"**Observation**: System is experiencing {', '.join(symptoms)}.\n"
-        analysis_text += f"**Context**: The symptoms are chemically similar (Distance: {distance:.2f}) to historic incident: *'{matched_summary}'*.\n"
-        analysis_text += f"**Inference**: Based on historical resolution patterns, this matches the signature of *{matched_cause}*."
-
-        # Decision Logic
-        recommendation = matched_action
-        root_cause = matched_cause
-        severity = matched_severity
-        escalation_reason = None
-
-        # Policy: If confidence is low, strictly escalate
-        if confidence < 0.65:
-            recommendation = "Escalate to L3"
-            escalation_reason = f"Low confidence ({confidence:.2f}) in diagnosis. Signature does not strongly match known incidents."
-            severity = "P2"
-            root_cause = "Ambiguous Anomaly Signature"
+        hypotheses = []
         
-        # Override for 'Service Down' - heuristic override is still useful for critical safety
-        if "Service Unavailable" in str(symptoms) and confidence < 0.9:
-             # Safety net: If service is down, we usually always want to restart unless we are sure.
-             # But for pure RAG demo, let's trust the RAG if it finds the Service Down incident.
-             pass
-
+        # 3. Formulate Hypotheses
+        if rag_results and rag_results['documents']:
+            for i, doc in enumerate(rag_results['documents'][0]):
+                meta = rag_results['metadatas'][0][i]
+                dist = rag_results['distances'][0][i]
+                
+                # Confidence Score
+                confidence = 1.0 / (1.0 + dist)
+                
+                hypotheses.append({
+                    "root_cause": meta.get('root_cause', 'Unknown'),
+                    "action": meta.get('recommended_action', 'Escalate'),
+                    "confidence": confidence,
+                    "reasoning": f"Matches similar incident: {meta.get('summary')} (Conf: {confidence:.2f}). Evidence: {query_context[:100]}..."
+                })
+        
+        # Fallback if empty (e.g. cold start)
+        if not hypotheses:
+            hypotheses.append({
+                "root_cause": "Unknown Anomaly",
+                "action": "Escalate to L3",
+                "confidence": 0.1,
+                "reasoning": "No RAG matches found."
+            })
+            
+        # Sort by confidence
+        hypotheses.sort(key=lambda x: x['confidence'], reverse=True)
+        top = hypotheses[0]
+        
+        # Decision
+        needs_approval = True
+        if top['confidence'] > 0.85 and "Restart" in top['action']:
+             needs_approval = False # Auto-action for very high confidence (example)
+        
+        final_summary = ". ".join(readable_symptoms) + "."
+             
         return {
-            "summary": f"Detected {', '.join(symptoms)}",
-            "root_cause": root_cause,
-            "analysis": analysis_text,
-            "recommended_action": recommendation,
-            "rag_context": past_incident,
-            "severity": severity,
-            "confidence": confidence,
-            "escalation_reason": escalation_reason
+            "incident_id": incident_id,
+            "hypotheses": hypotheses,
+            "top_recommendation": top['action'],
+            "severity": "P2", # placeholder
+            "needs_approval": needs_approval,
+            "summary": final_summary,
+            "evidence": evidence_text 
         }

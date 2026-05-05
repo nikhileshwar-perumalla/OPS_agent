@@ -2,137 +2,230 @@ import streamlit as st
 import time
 import pandas as pd
 import json
-from datetime import datetime
 import sys
 import os
-
+from datetime import datetime
 from dotenv import load_dotenv
 
 # Load env vars
 load_dotenv()
 
-# Add root to path so imports work
+# Add root to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.simulation.metrics_generator import MetricsGenerator
-from src.simulation.logs_generator import LogGenerator
+from src.simulation.engine import SimulationEngine, SimulationMode
+from src.simulation.observations import FileLogSource
 from src.detection.anomaly_model import AnomalyDetector
-from src.agent.rca_agent import RCAAgent
-from src.orchestration.policy_engine import PolicyEngine
 from src.integration.slack_client import SlackNotifier
 from src.integration.jira_client import JiraConnector
+from src.agent.rca_agent import RCAAgent
+from src.orchestration.policy_engine import PolicyEngine
 
 # Page Config
-st.set_page_config(page_title="AI Ops Agent (L1/L2)", layout="wide")
+st.set_page_config(page_title="AI Ops Agent (Phase 2)", layout="wide")
 
-# Session State Initialization
-if 'metrics_history' not in st.session_state:
-    st.session_state.metrics_history = []
-if 'log_history' not in st.session_state:
-    st.session_state.log_history = []
-if 'anomaly_active' not in st.session_state:
-    st.session_state.anomaly_active = False
-if 'agent_triggered' not in st.session_state:
-    st.session_state.agent_triggered = False
-if 'current_rca' not in st.session_state:
-    st.session_state.current_rca = None
-if 'active_ticket_id' not in st.session_state:
-    st.session_state.active_ticket_id = None
-if 'audit_trail' not in st.session_state:
-    st.session_state.audit_trail = []
-
-# Instantiate Components (Singleton-ish via cache would be better, but simple global for demo app flow)
-if 'components' not in st.session_state:
-    st.session_state.components = {
-        'metrics_gen': MetricsGenerator(),
-        'logs_gen': LogGenerator(),
-        'detector': AnomalyDetector(),
-        'agent': RCAAgent(),
-        'policy': PolicyEngine(),
-        'policy': PolicyEngine(),
-        # Use env vars or default to mock
-        'slack': SlackNotifier(webhook_url=os.getenv("SLACK_WEBHOOK_URL"), mock=False),
-        'jira': JiraConnector(
+# Valid States
+if 'engine' not in st.session_state:
+    engine = SimulationEngine()
+    # Configure Dependencies
+    engine.log_source = FileLogSource('data/app_logs.log')
+    engine.agent = RCAAgent() 
+    engine.detector = AnomalyDetector()
+    engine.slack_notifier = SlackNotifier(webhook_url=os.getenv("SLACK_WEBHOOK_URL"), mock=False)
+    engine.jira_connector = JiraConnector(
             url=os.getenv("JIRA_URL"),
             username=os.getenv("JIRA_USERNAME"),
             token=os.getenv("JIRA_API_TOKEN"),
             project_key=os.getenv("JIRA_PROJECT_KEY", "KAN"),
             mock=False
-        )
-    }
-    # Pre-train detector with some dummy normal data
-    normal_data = [[30, 40, 0.05], [32, 41, 0.06], [29, 39, 0.04]] * 5
-    st.session_state.components['detector'].train_initial(normal_data)
+    )
+    st.session_state.engine = engine
 
-comps = st.session_state.components
+# --- Dependency Management ---
+# Use cache_resource to keep DB connections alive across reruns
+@st.cache_resource
+def get_shared_agent():
+    print("[App] Initializing Cached RCAAgent...")
+    return RCAAgent()
 
-# Title & Layout
-st.title("🛡️ AI-Powered Ops Agent (L1/L2 Support)")
-st.markdown("Automated Monitoring, Anomaly Detection, and Guided Root Cause Analysis")
+@st.cache_resource
+def get_shared_slack():
+    return SlackNotifier(webhook_url=os.getenv("SLACK_WEBHOOK_URL"), mock=False)
 
-col1, col2 = st.columns([2, 1])
+def get_shared_jira():
+    return JiraConnector(
+            url=os.getenv("JIRA_URL"),
+            username=os.getenv("JIRA_USERNAME"),
+            token=os.getenv("JIRA_API_TOKEN"),
+            project_key=os.getenv("JIRA_PROJECT_KEY", "KAN"),
+            mock=False
+    )
 
-# --- Sidebar Controls ---
-st.sidebar.header("Simulation Controls")
-sim_options = ["Normal Operation", "High CPU Incident", "Memory Leak", "DB Connection Failure", "Service Down"]
-selected_sim = st.sidebar.selectbox("Inject Scenario", sim_options)
-
-if st.sidebar.button("Apply Scenario"):
-    if selected_sim == "Normal Operation":
-        comps['metrics_gen'].clear_anomaly()
-        st.session_state.anomaly_active = False
-        st.session_state.agent_triggered = False
-        st.session_state.current_rca = None
-    elif selected_sim == "High CPU Incident":
-        comps['metrics_gen'].set_anomaly('high_cpu')
-    elif selected_sim == "Memory Leak":
-        comps['metrics_gen'].set_anomaly('memory_leak')
-    elif selected_sim == "DB Connection Failure":
-        comps['metrics_gen'].set_anomaly('db_connection_error')
-    elif selected_sim == "Service Down":
-        comps['metrics_gen'].set_anomaly('service_down')
+# Always re-attach dependencies to the session text engine
+# This fixes the issue where unpicklable objects (like ChromaDB) are lost on rerun
+st.session_state.engine.agent = get_shared_agent()
+st.session_state.engine.slack_notifier = get_shared_slack()
+st.session_state.engine.jira_connector = get_shared_jira()
     
-    st.toast(f"Scenario Applied: {selected_sim}")
+engine = st.session_state.engine
+
+if 'auto_run' not in st.session_state:
+    st.session_state.auto_run = False
+
+if 'tick_history' not in st.session_state:
+    st.session_state.tick_history = []
+
+engine = st.session_state.engine
+
+# --- Sidebar ---
+st.sidebar.title("🎮 Simulation Control")
+
+# Mode Selection
+# Defaulting to SIMULATION (User requested removal of Observe Only)
+engine.set_mode(SimulationMode.SIMULATION)
+st.sidebar.caption(f"Mode: {engine.mode.value.upper()}")
 
 st.sidebar.divider()
-if st.sidebar.button("Reset System"):
-    st.session_state.metrics_history = []
-    st.session_state.log_history = []
-    st.session_state.audit_trail = []
-    if 'components' in st.session_state:
-        del st.session_state['components'] # Force reload of components
-    # comps['metrics_gen'].clear_anomaly() # Cannot call this if we deleted components, but re-init will allow start fresh
-    st.rerun()
 
-# --- Main Loop Logic ---
-# Data is now generated efficiently inside the fragment in UI section.
-# But for the very first render (before fragment runs), we need safe initialization.
-if not st.session_state.metrics_history:
-    st.session_state.metrics_history.append(comps['metrics_gen'].generate_metrics())
-if not st.session_state.log_history:
-    st.session_state.log_history.append(comps['logs_gen'].generate_log())
+# Tick Controls
+col1, col2 = st.sidebar.columns(2)
+if col1.button("▶️ Start"):
+    st.session_state.auto_run = True
+if col2.button("MwPause"):
+    st.session_state.auto_run = False
 
-# Detection Step (runs on whatever data we have)
-# This allows the 'Control Panel' to stay sync'd with the latest fragment update 
-# IF the user interacts.
-latest_metrics = st.session_state.metrics_history[-1]
-anomaly_result = comps['detector'].detect(latest_metrics)
-critical_logs = [l for l in st.session_state.log_history[-3:] if l['level'] == 'CRITICAL' or l['level'] == 'ERROR']
-if critical_logs and not anomaly_result['is_anomaly']:
-    anomaly_result['is_anomaly'] = True
-    anomaly_result['reasons'].append("Critical Error Logs Detected")
-# --- Ends Main Loop Pre-Calculation ---
+if st.sidebar.button("⏩ Step Tick"):
+    st.session_state.step_once = True
+else:
+    st.session_state.step_once = False
 
-# --- Polling handled by fragment above ---
+st.sidebar.divider()
 
-# --- UI Visualization ---
+# Incident Injection
+st.sidebar.subheader("Inject Incident")
+inc_type = st.sidebar.selectbox("Type", [
+    "high_cpu", "memory_leak", "network_latency", "service_down",
+    "disk_usage_high", "process_crash", "database_lock", "ssl_expiry"
+])
+if st.sidebar.button("Inject"):
+    engine.inject_incident(inc_type)
+    st.toast(f"Injected {inc_type}")
 
-# --- Polling Fragment (Hidden) ---
-@st.fragment(run_every=3)
-def poll_slack_updates():
-    """
-    Checks for Slack events in the background, processes them, and updates state.
-    """
+# --- Main UI ---
+st.title("🛡️ AI Ops Agent: Phase 2")
+
+# Metrics & State Display
+m_col1, m_col2, m_col3 = st.columns(3)
+m_col1.metric("Tick", engine.tick_count)
+m_col2.metric("Active Incidents", len(engine.state_tracker.get_active()))
+m_col3.metric("Mode", engine.mode.value.upper())
+
+# Tick Logic (Fragment for Auto-Run)
+@st.fragment(run_every=2 if st.session_state.auto_run else None)
+def game_loop():
+    should_tick = False
+    if st.session_state.auto_run:
+        should_tick = True
+    elif st.session_state.get('step_once'):
+        # Only tick once, then consume the flag (state trickery needed here?)
+        # Actually fragments might re-run, simpler to just check session state trigger outside?
+        # For simplicity, if auto_run is off, we rely on the main script rerun triggered by button.
+        pass
+
+    if should_tick:
+        state = engine.tick()
+        # Append to history for viz
+        st.session_state.tick_history.append(state)
+        if len(st.session_state.tick_history) > 30:
+             st.session_state.tick_history.pop(0)
+
+    # Visualization (Always render latest)
+    if st.session_state.tick_history:
+        latest = st.session_state.tick_history[-1]
+        metrics = latest.get('metrics', {})
+        features = latest.get('log_features', {})
+        analysis = metrics.get('latest_analysis') # Retrieved from engine
+        
+        # Charts
+        # Metric Chart (Full Width)
+        df = pd.DataFrame([s['metrics'] for s in st.session_state.tick_history])
+        if not df.empty and 'cpu_percent' in df.columns:
+            st.subheader("System Metrics")
+            # Added disk_percent if available
+            cols = ['cpu_percent', 'memory_percent', 'latency_seconds']
+            if 'disk_percent' in df.columns: cols.append('disk_percent')
+            st.line_chart(df[cols])
+            
+        # Incident List
+        st.subheader("Active Incidents")
+        
+        # Use LIVE state, not history (avoids UI lag on resolution)
+        active_incidents = engine.state_tracker.get_active()
+        
+        if active_incidents:
+            for incident in active_incidents:
+                # Color code based on severity/state
+                status_icon = "🔥" if incident.state.value == "ESCALATED" else "⚠️"
+                label = f"{status_icon} **{incident.id}** | Type: {incident.type.value} | State: {incident.state.value}"
+                
+                with st.expander(label, expanded=True):
+                    st.write(f"**Started at Tick:** {incident.start_tick}")
+
+                    # Show Jira Ticket
+                    if incident.jira_ticket_key:
+                        jira_url = os.getenv("JIRA_URL", "")
+                        ticket_link = f"{jira_url}/browse/{incident.jira_ticket_key}"
+                        st.markdown(f"🎫 **Jira Ticket:** [{incident.jira_ticket_key}]({ticket_link})")
+
+                    # Show Analysis Persistence
+                    if incident.analysis:
+                        analysis = incident.analysis
+                        st.subheader(f"🧠 Agent Hypothesis")
+                        
+                        # Top Recommendation
+                        st.markdown(f"**Top Recommendation**: `{analysis.get('top_recommendation')}`")
+                        st.markdown(f"**Summary**: {analysis.get('summary')}")
+                        
+                        # Ranked Hypotheses
+                        st.caption("Ranked Hypotheses (Confidence)")
+                        for hyp in analysis.get('hypotheses', []):
+                            conf = hyp['confidence']
+                            st.progress(conf, text=f"{hyp['root_cause']} ({int(conf*100)}%) - {hyp['reasoning']}")
+                        
+                        if analysis.get('needs_approval'):
+                            st.warning("⚠️ Action Requires Approval (Policy Check)")
+                            c_act1, c_act2 = st.columns(2)
+                            # We use unique keys for buttons
+                            if c_act1.button("✅ Approve", key=f"app_{incident.id}"):
+                                engine.approve_action(incident.id)
+                                st.toast("Action Approved! System Recovering...")
+                                time.sleep(1)
+                                st.rerun()
+                                
+                            if c_act2.button("❌ Deny", key=f"den_{incident.id}"):
+                                engine.deny_action(incident.id)
+                                st.toast("Action Denied. Escalating...")
+                                time.sleep(1)
+                                st.rerun()
+                    else:
+
+                        # Check if we have a recent error
+                        logs = getattr(engine, 'system_logs', [])
+                        recent_logs = logs[-5:] # check last 5
+                        agent_error = next((l for l in recent_logs if "[Agent Error]" in l), None)
+                        
+                        if agent_error:
+                             st.error(f"⚠️ Analysis Failed: {agent_error}")
+                             if st.button("🔄 Retry Analysis", key=f"retry_{incident.id}"):
+                                 # Force re-trigger
+                                 engine.trigger_reanalysis()
+                                 st.rerun()
+                        else:
+                             st.info("⏳ Waiting for Agent Analysis... (Next Tick)")
+        else:
+            st.success("No Active Incidents")
+
+    # Polling for External Actions (Slack)
     PENDING_FILE = 'data/pending_actions.json'
     if os.path.exists(PENDING_FILE):
         try:
@@ -140,258 +233,152 @@ def poll_slack_updates():
                 pending_events = json.load(f)
             
             if pending_events:
-                print(f"[Dashboard Polling] Found {len(pending_events)} events.", flush=True)
-                
-                # Check for relevant events
-                action_taken = False
-                
                 for event in pending_events:
-                    event_ticket = event.get('ticket_id')
                     action_id = event.get('action_id')
+                    ticket_id = event.get('ticket_id')
                     user = event.get('user')
                     
-                    # Ensure we have an active ticket to match against
-                    # We access st.session_state directly.
-                    active_id = st.session_state.get('active_ticket_id')
-                    
-                    if active_id and st.session_state.get('current_rca'):
-                        # Relaxed ID Check for Demo Smoothness
-                        # We accept the action if it matches OR if we are in a valid state to accept it (ignoring ID mismatch for demo)
-                        is_match = (active_id == event_ticket)
-                        
-                        if not is_match:
-                             print(f"[Dashboard Polling] ID Mismatch (Active: {active_id} vs Event: {event_ticket}). Applying anyway for demo.", flush=True)
-
-                        rca = st.session_state.current_rca
-                        action_name = rca.get('recommended_action', 'Unknown')
-                        
-                        if action_id == "approve_action":
-                            comps['jira'].update_status(active_id, "RESOLVED", f"Approved via Slack by @{user} (Ticket {event_ticket})")
-                            comps['metrics_gen'].clear_anomaly()
-                            st.session_state.audit_trail.append({
-                                "time": datetime.now().isoformat(),
-                                "event": "Slack Approval Received",
-                                "details": f"@{user} approved '{action_name}'"
-                            })
-                            st.toast(f"✅ Slack: @{user} APPROVED action '{action_name}'")
-                            
-                            # Update State to Reset
-                            st.session_state.agent_triggered = False
-                            st.session_state.current_rca = None
-                            st.session_state.active_ticket_id = None
-                            action_taken = True
-                            break
-                            
-                        elif action_id == "escalate_action":
-                            comps['jira'].update_status(active_id, "ESCALATED", f"Escalated via Slack by @{user} (Ticket {event_ticket})")
-                            st.session_state.audit_trail.append({
-                                "time": datetime.now().isoformat(),
-                                "event": "Slack Escalation Received",
-                                "details": f"@{user} escalated incident"
-                            })
-                            st.toast(f"⚠️ Slack: @{user} ESCALATED incident")
-                            
-                            # Update State to Reset
-                            st.session_state.agent_triggered = False
-                            st.session_state.current_rca = None
-                            st.session_state.active_ticket_id = None
-                            action_taken = True
-                            break
-                    else:
-                        print(f"[Dashboard Polling] Skipping Event {event_ticket}. No Active Incident.", flush=True)
-
-                # Clear the file regardless (consume all events to prevents loops)
-                # Or maybe only if we processed one? No, safer to clear queue to avoid staleness.
+                    if action_id == "approve_action":
+                        engine.approve_action(ticket_id)
+                        st.toast(f"Slack: @{user} Approved {ticket_id}")
+                    elif action_id == "escalate_action":
+                        engine.deny_action(ticket_id)
+                        st.toast(f"Slack: @{user} Escalated {ticket_id}")
+                
+                # Clear file
                 with open(PENDING_FILE, 'w') as f:
                     json.dump([], f)
-                
-                if action_taken:
-                    time.sleep(1) # Allow toast to be seen?
-                    st.rerun()
-                
+                    
         except Exception as e:
-            print(f"[Dashboard Polling Error] {e}", flush=True)
+            # print(f"Polling Error: {e}")
+            pass
 
-poll_slack_updates()
+game_loop()
 
-# --- UI Visualization ---
-
-with col1:
-    @st.fragment(run_every=2)
-    def live_metrics_section():
-        # Generate new data point
-        # Note: In a fragment, we must be careful about mutating global session state if other parts read it.
-        # But here valid just to append for visualization.
-        new_metrics = comps['metrics_gen'].generate_metrics()
-        new_log = comps['logs_gen'].generate_log(anomaly_mode=new_metrics['anomaly_active'])
-        
-        # We need to access/update the 'history' in session state.
-        # Since this runs in a separate context, ensure we don't have race conditions (Streamlit manages this mostly).
-        st.session_state.metrics_history.append(new_metrics)
-        if len(st.session_state.metrics_history) > 60: st.session_state.metrics_history.pop(0)
-
-        st.session_state.log_history.append(new_log)
-        if len(st.session_state.log_history) > 20: st.session_state.log_history.pop(0)
-
-        st.subheader("Live System Metrics")
-        df = pd.DataFrame(st.session_state.metrics_history)
-        if not df.empty:
-            st.line_chart(df[['cpu_percent', 'memory_percent']], height=200)
-            st.line_chart(df[['latency_seconds']], height=150)
-        
-        st.subheader("Live Logs")
-        for l in reversed(st.session_state.log_history[-5:]):
-            color = "red" if l['level'] in ['ERROR', 'CRITICAL'] else "green"
-            st.markdown(f":{color}[[{l['timestamp']}] {l['level']} {l['method']} {l['endpoint']} - {l['message']}]")
-
-    live_metrics_section()
-
-with col2:
-    st.subheader("Ops Agent Status")
-    
-    # We need the LATEST metrics for detection, which were just updated in the fragment/session_state?
-    # Actually, the fragment updates session_state, but THIS main script runs top-to-bottom.
-    # So 'metrics' variable from line 95 is "stale" if we moved generation into the fragment.
-    # FIX: We should execute detection logic INSIDE the fragment or rely on shared state.
-    # Better: Let's keep data generation in the MAIN loop (so it runs on manual interaction)
-    # AND inside the fragment for auto-updates.
-    # Actually, simpler: The Fragment updates the display.
-    # The main loop logic for "Status" needs the latest data.
-    # If the main loop is static, "Status" won't update until interaction.
-    # This is exactly what the user wants ("does not disturb me").
-    # The anomaly status should ONLY change when they click "Apply Scenario" (which reruns main loop).
-    
-    if st.session_state.metrics_history:
-        latest_metrics = st.session_state.metrics_history[-1]
-        anomaly_result = comps['detector'].detect(latest_metrics)
-        
-        crit_logs = [l for l in st.session_state.log_history[-3:] if l['level'] in ['ERROR', 'CRITICAL']]
-        if crit_logs and not anomaly_result['is_anomaly']:
-             anomaly_result['is_anomaly'] = True
-             anomaly_result['reasons'].append("Critical Logs")
-    else:
-         anomaly_result = {'is_anomaly': False, 'reasons': []}
-
-    status_color = "green"
-    status_text = "System Healthy"
-    
-    if anomaly_result['is_anomaly']:
-        status_color = "red"
-        status_text = "⚠️ ANOMALY DETECTED"
-        st.error(f"Alert: {', '.join(anomaly_result['reasons'])}")
-        
-        if not st.session_state.agent_triggered:
-            if st.button("🤖 Hand Over to Ops Agent"):
-                st.session_state.agent_triggered = True
-                with st.spinner("Agent Analyzing..."):
-                    # Use last known metrics
-                    metrics_snap = st.session_state.metrics_history[-1] if st.session_state.metrics_history else {}
-                    rca_result = comps['agent'].analyze_incident(metrics_snap, st.session_state.log_history[-10:])
-                    st.session_state.current_rca = rca_result
-                    
-                    # Create Ticket
-                    ticket_id = comps['jira'].create_ticket({
-                         'summary': rca_result.get('summary', 'Incident'),
-                         'root_cause': rca_result.get('root_cause'),
-                         'severity': rca_result.get('severity', 'P2')
-                    })
-                    st.session_state.active_ticket_id = ticket_id
-                    
-                    # Slack
-                    slack_response = comps['slack'].post_incident(rca_result, ticket_id=ticket_id)
-                    
-                    st.session_state.audit_trail.append({
-                        "time": datetime.now().isoformat(),
-                        "event": "RCA Triggered",
-                        "details": f"Jira: {ticket_id} | Slack Sent"
-                    })
-                    
-                    if slack_response and slack_response.get('mock'):
-                        with st.expander("🔌 Slack Notification (Mock Mode)", expanded=True):
-                            st.info("System is in Mock Mode. This payload would be sent to Slack:")
-                            st.json(slack_response.get('payload', {}))
-                            st.caption(f"Interactive Callback URL: {slack_response.get('callback', 'Not Set')}")
-                            st.warning("To send real messages, please provide a Slack Incoming Webhook URL.")
-                st.rerun()
-    
-    st.markdown(f"**Status**: :{status_color}[{status_text}]")
-    
-    # ... Agent Output & Actions (Standard Static Code) ...
-
-
-    # --- Agent Output & Actions ---
-    if st.session_state.agent_triggered and st.session_state.current_rca:
-        rca = st.session_state.current_rca
-        
-        st.info(f"### 🧠 Agent Diagnosis (Ticket: {st.session_state.active_ticket_id})")
-        
-        # Display Severity Badge
-        severity = rca.get('severity', 'P2')
-        sev_color = "red" if severity == "P1" else "orange"
-        st.markdown(f"**Severity**: :{sev_color}[{severity}] | **Confidence**: {rca.get('confidence', 0.0)}")
-        
-        st.markdown(f"**Root Cause**: {rca.get('root_cause', 'Unknown')}")
-        st.markdown(f"**Analysis**: \n{rca.get('analysis', 'No detailed analysis available.')}")
-        st.markdown(f"**Recommendation**: `{rca.get('recommended_action', 'Escalate to L3')}`")
-        if rca.get('escalation_reason'):
-            st.warning(f"Escalation Reason: {rca['escalation_reason']}")
-        
-        # Policy Check
-        action = rca.get('recommended_action', 'Escalate to L3')
-        policy_status, policy_msg = comps['policy'].check_safety(action)
-        
-        # Confidence Guardrail
-        confidence = rca.get('confidence', 0.5)
-        if confidence < 0.75:
-            policy_status = "REQUIRES_APPROVAL"
-            policy_msg += f" (Low Confidence {confidence} < 0.75)"
-        
-        st.markdown("---")
-        st.markdown(f"**Policy Check**: {policy_status}")
-        st.caption(policy_msg)
-        
-        if policy_status == "REQUIRES_APPROVAL":
-            col_a, col_b = st.columns(2)
-            with col_a:
-                if st.button("✅ Approve Action"):
-                    # Execute Action
-                    comps['jira'].update_status(st.session_state.active_ticket_id, "RESOLVED", f"Action {action} approved by user.")
-                    st.session_state.audit_trail.append({
-                        "time": datetime.now().isoformat(),
-                        "event": "Action Approved & Executed",
-                        "details": f"User approved: {action} | Ticket Resolved"
-                    })
-                    comps['metrics_gen'].clear_anomaly() # Simulate Fix
-                    st.success(f"Action '{action}' Executed via Automation.")
-                    time.sleep(1)
-                    st.session_state.agent_triggered = False
-                    st.session_state.current_rca = None
-                    st.session_state.active_ticket_id = None
-                    st.rerun()
-            with col_b:
-                if st.button("❌ Deny / Manual Fix"):
-                    comps['jira'].update_status(st.session_state.active_ticket_id, "ESCALATED", "User denied automated action.")
-                    st.session_state.audit_trail.append({
-                        "time": datetime.now().isoformat(),
-                        "event": "Action Denied",
-                        "details": "User chose manual intervention | Ticket Escalated"
-                    })
-                    st.warning("Agent dismissed. Manual intervention required.")
-                    st.session_state.agent_triggered = False
-                    st.session_state.current_rca = None
-                    st.session_state.active_ticket_id = None
-                    st.rerun()
+# Manual Step Handling (Outside Fragment)
+if st.session_state.step_once and not st.session_state.auto_run:
+    state = engine.tick()
+    st.session_state.tick_history.append(state)
+    st.rerun()
 
 st.divider()
-with st.expander("📜 Incident Audit Trail"):
-    for item in st.session_state.audit_trail:
-        st.code(f"{item['time']} - {item['event']}: {item['details']}")
+st.subheader("💻 Chaos Terminal")
 
-# Keep alive (auto-refresh) - Enables polling for Slack events ONLY when an incident is active
-if st.session_state.agent_triggered:
-    time.sleep(3)
-    st.rerun()
+# Live Terminal Output
+terminal_logs = getattr(engine, 'system_logs', [])
+terminal_text = "\n".join(terminal_logs[-20:]) # Show last 20 lines
+st.code(terminal_text, language="bash")
 
-if st.button("🔄 Refresh Data"):
-    st.rerun()
+# Unified Input
+# Unified Input (Chat Style - Fixed at Bottom)
+# prompt = st.chat_input("admin@ops-agent:~$ Type command or paste logs...")
+# Use chat_input to allow "Enter to Run" behavior
+prompt = st.chat_input("admin@ops-agent:~$ (Type command or paste logs)")
 
+if prompt:
+    lines = prompt.strip().split('\n')
+    
+    # Echo to Chaos Terminal
+    # engine.log(f"[User Input] {prompt}") # Optional echo
+    
+    # Heuristic: Is this a log paste? (Multiple lines or timestamp/level)
+    is_log = len(lines) > 1 or any(x in prompt for x in ["INFO", "WARN", "ERROR", "202"])
+    
+    if is_log:
+        # Log Injection Mode
+        log_file = 'data/app_logs.log'
+        try:
+            with open(log_file, 'a') as f:
+                f.write("\n" + prompt + "\n")
+            
+            # Echo to Chaos Terminal for visual feedback
+            engine.log(f"[Injector] Writing {len(lines)} lines to log stream...")
+            for line in lines:
+                if line.strip():
+                    engine.log(f"   > {line.strip()}")
+                    
+            st.toast(f"Injected {len(lines)} log lines")
+            
+            # Force Immediate Action
+            engine.cooldown_until = 0 # Bypass any cooldowns
+            
+            if engine.trigger_reanalysis():
+                 # Incident exists, re-analyze
+                 st.toast("Logs Injected. Re-analyzing...")
+            else:
+                 # No incident, this should trigger one next tick
+                 st.toast("Logs Injected. Triggering Detection...")
+            
+            # Force a tick immediately to process the new logs/state
+            state = engine.tick()
+            st.session_state.tick_history.append(state)
+            
+            # Rerun to show results instantly
+            time.sleep(0.1) # Brief pause to ensure files flush if needed
+            st.rerun()
+                 
+        except Exception as e:
+            st.error(f"Failed to write logs: {e}")
+            
+    else:
+        # Command Mode
+        cmd = prompt.strip().lower()
+        
+        if cmd == "help":
+            # We can't really print to the chat input, so print to terminal log
+            help_text = """
+            Available Commands:
+            - inject cpu          : Trigger High CPU Incident
+            - inject memory       : Trigger Memory Leak
+            - inject latency      : Trigger Network Latency
+            - inject service      : Trigger Service Down
+            - inject disk         : Trigger High Disk Usage
+            - inject process      : Trigger Process Crash
+            - inject db           : Trigger Database Lock
+            - inject ssl          : Trigger SSL Expiry
+            - resolve <id>        : Force resolve incident
+            - status              : Show engine status
+            """
+            for line in help_text.split('\n'):
+                 if line.strip(): engine.log(line.strip())
+            
+        elif cmd.startswith("inject"):
+            parts = cmd.split()
+            if len(parts) > 1:
+                target = parts[1]
+                type_map = {
+                    "cpu": "high_cpu",
+                    "memory": "memory_leak",
+                    "latency": "network_latency",
+                    "network": "network_latency",
+                    "service": "service_down",
+                    "disk": "disk_usage_high",
+                    "process": "process_crash",
+                    "db": "database_lock",
+                    "lock": "database_lock",
+                    "ssl": "ssl_expiry",
+                    "cert": "ssl_expiry"
+                }
+                if target in type_map:
+                    engine.inject_incident(type_map[target])
+                    st.toast(f"Executed: {cmd}")
+                    time.sleep(0.5)
+                    st.rerun()
+                else:
+                    st.toast(f"Unknown injection target: {target}")
+                    engine.log(f"[Error] Unknown target: {target}")
+        
+        elif cmd.startswith("resolve"):
+            parts = cmd.split()
+            if len(parts) > 1:
+                iid = parts[1]
+                engine.approve_action(iid)
+                st.toast(f"Force Resolved {iid}")
+                st.rerun()
+                
+        elif cmd == "status":
+            engine.log(f"Tick: {engine.tick_count} | Mode: {engine.mode.value} | Incidents: {len(engine.state_tracker.get_active())}")
+            
+        else:
+            engine.log(f"[Error] Command not found: {cmd}")
+            st.toast(f"Command not found: {cmd}")
