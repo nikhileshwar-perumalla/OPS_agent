@@ -12,6 +12,12 @@ The system ships with a **FastAPI backend** driving a tick-based simulation engi
 > For deeper architecture notes and Mermaid diagrams, see [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md).
 
 ---
+## Frontend
+
+The live dashboard shows the incident queue, the agent pipeline (Triage → Diagnostics →
+RCA → Remediation → Comms), root-cause hypothesis, recommended action with approve/deny
+gate, agent chatter, live signals, and the system log.
+<img width="1920" height="924" alt="image" src="https://github.com/user-attachments/assets/88b76b07-039f-46ec-85f3-2181c09abbcf" />
 
 ## Architecture
 
